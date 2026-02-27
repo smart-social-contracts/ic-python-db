@@ -1,1 +1,1 @@
-ic-python-logging==0.1.*
+ic-python-logging @ git+https://github.com/smart-social-contracts/ic-python-logging.git@main

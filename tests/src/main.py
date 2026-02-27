@@ -1,4 +1,4 @@
-from basilisk import StableBTreeMap, ic, query, update
+from ic_python_db._cdk import StableBTreeMap, ic, query, update
 
 from ic_python_db import *
 from tests import (

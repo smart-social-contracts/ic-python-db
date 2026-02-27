@@ -5,7 +5,7 @@ each operation. Results are returned as strings so the external orchestrator
 can parse and compare them.
 """
 
-from basilisk import ic
+from ic_python_db._cdk import ic
 from tester import Tester
 
 from ic_python_db import (

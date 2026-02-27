@@ -1,6 +1,5 @@
-from ic_python_db._cdk import StableBTreeMap, ic, query, update
-
 from ic_python_db import *
+from ic_python_db._cdk import StableBTreeMap, ic, query, update
 from tests import (
     test_alias_and_properties,
     test_audit,

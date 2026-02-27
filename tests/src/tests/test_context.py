@@ -2,9 +2,9 @@
 
 import pytest
 
-from kybra_simple_db import Database, Entity, String
-from kybra_simple_db.context import get_caller_id, set_caller_id
-from kybra_simple_db.mixins import TimestampedMixin
+from ic_python_db import Database, Entity, String
+from ic_python_db.context import get_caller_id, set_caller_id
+from ic_python_db.mixins import TimestampedMixin
 
 
 def test_get_caller_id_default():
@@ -91,8 +91,8 @@ def test_as_user_with_access_control():
 
         @staticmethod
         def on_event(entity, field_name, old_value, new_value, action):
-            from kybra_simple_db import ACTION_DELETE, ACTION_MODIFY
-            from kybra_simple_db.context import get_caller_id
+            from ic_python_db import ACTION_DELETE, ACTION_MODIFY
+            from ic_python_db.context import get_caller_id
 
             caller = get_caller_id()
 

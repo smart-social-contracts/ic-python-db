@@ -27,9 +27,9 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-# Internet Computer / Kybra
+# Internet Computer / Basilisk
 .dfx/
-.kybra/
+.basilisk/
 
 # IDEs and editors
 .idea/

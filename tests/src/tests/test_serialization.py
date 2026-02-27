@@ -2,7 +2,7 @@
 
 from tester import Tester
 
-from kybra_simple_db import (
+from ic_python_db import (
     Database,
     Entity,
     ManyToMany,
@@ -280,7 +280,7 @@ class TestSerialization:
         Database.get_instance().clear()
 
         # Test generic deserialization using Entity.deserialize()
-        from kybra_simple_db import Entity
+        from ic_python_db import Entity
 
         recreated_parent = Entity.deserialize(parent_data)
         recreated_child = Entity.deserialize(child_data)

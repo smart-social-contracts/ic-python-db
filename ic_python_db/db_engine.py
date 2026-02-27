@@ -7,7 +7,7 @@ import time
 import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
-from kybra_simple_logging import get_logger
+from ic_python_logging import get_logger
 
 from .storage import MemoryStorage, Storage
 

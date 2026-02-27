@@ -1,11 +1,11 @@
-"""Simple example script showing basic usage of kybra_simple_db with:
+"""Simple example script showing basic usage of ic_python_db with:
 
 - Creation modification and deletion of objects.
 - Properties and relationships."""
 
-from kybra_simple_logging import get_logger
+from ic_python_logging import get_logger
 
-from kybra_simple_db import (
+from ic_python_db import (
     Database,
     Entity,
     String,

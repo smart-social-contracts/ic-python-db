@@ -2,7 +2,7 @@
 
 import pytest
 
-from kybra_simple_db import (
+from ic_python_db import (
     ACTION_CREATE,
     ACTION_DELETE,
     ACTION_MODIFY,

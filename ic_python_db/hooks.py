@@ -2,7 +2,7 @@
 
 Entities can define an on_event static method to intercept and control changes:
 
-    from kybra_simple_db import Entity, String, ACTION_MODIFY
+    from ic_python_db import Entity, String, ACTION_MODIFY
 
     class User(Entity):
         name = String()

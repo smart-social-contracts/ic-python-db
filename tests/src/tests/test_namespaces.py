@@ -1,4 +1,4 @@
-"""Simple test demonstrating namespace functionality in Kybra Simple DB.
+"""Simple test demonstrating namespace functionality in IC Python DB.
 
 This test shows how entities can be organized into namespaces to avoid
 type conflicts when you have multiple entities with the same class name.
@@ -6,7 +6,7 @@ type conflicts when you have multiple entities with the same class name.
 
 from tester import Tester
 
-from kybra_simple_db import *
+from ic_python_db import *
 
 
 # Entities without namespace (default behavior)

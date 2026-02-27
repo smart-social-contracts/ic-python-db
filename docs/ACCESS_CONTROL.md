@@ -4,7 +4,7 @@ This guide shows how to implement access control using the `on_event` hooks comb
 
 ## Overview
 
-The `kybra-simple-db` provides thread-safe context management for tracking the current user:
+The `ic-python-db` provides thread-safe context management for tracking the current user:
 
 - **`db.as_user(user_id)`** - Context manager for running operations as a specific user
 - **`get_caller_id()`** - Get the current user ID
@@ -13,8 +13,8 @@ The `kybra-simple-db` provides thread-safe context management for tracking the c
 ## Basic Usage
 
 ```python
-from kybra_simple_db import Database, Entity, String
-from kybra_simple_db.mixins import TimestampedMixin
+from ic_python_db import Database, Entity, String
+from ic_python_db.mixins import TimestampedMixin
 
 db = Database.get_instance()
 
@@ -34,9 +34,9 @@ with db.as_user("bob"):
 Combine `as_user()` with `on_event` hooks for access control:
 
 ```python
-from kybra_simple_db import ACTION_MODIFY, ACTION_DELETE, Entity, String
-from kybra_simple_db.context import get_caller_id
-from kybra_simple_db.mixins import TimestampedMixin
+from ic_python_db import ACTION_MODIFY, ACTION_DELETE, Entity, String
+from ic_python_db.context import get_caller_id
+from ic_python_db.mixins import TimestampedMixin
 
 class ProtectedDocument(Entity, TimestampedMixin):
     title = String()

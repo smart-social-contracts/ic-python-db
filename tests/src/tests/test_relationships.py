@@ -1,8 +1,8 @@
-"""Tests for relationship properties in Kybra Simple DB."""
+"""Tests for relationship properties in IC Python DB."""
 
 from tester import Tester
 
-from kybra_simple_db import *
+from ic_python_db import *
 
 
 class Person(Entity):

@@ -5,10 +5,10 @@
 3. Entity Inheritance
 """
 
-from kybra_simple_logging import get_logger
+from ic_python_logging import get_logger
 
-import kybra_simple_db as ksdb
-from kybra_simple_db.context import set_caller_id
+import ic_python_db as ksdb
+from ic_python_db.context import set_caller_id
 
 logger = get_logger(__name__)
 

@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Set, Type, TypeVar
 
-from kybra_simple_logging import get_logger
+from ic_python_logging import get_logger
 
 from .constants import LEVEL_MAX_DEFAULT
 from .db_engine import Database
@@ -572,7 +572,7 @@ class Entity:
         )
 
         # Add all property descriptors from class hierarchy
-        from kybra_simple_db.properties import Property
+        from ic_python_db.properties import Property
 
         for cls in reversed(self.__class__.__mro__):
             for k, v in cls.__dict__.items():
@@ -598,7 +598,7 @@ class Entity:
             if rel_entities:
                 # Check if this is a *ToMany relation that should always be a list
                 rel_prop = getattr(self.__class__, rel_name, None)
-                from kybra_simple_db.properties import ManyToMany, OneToMany
+                from ic_python_db.properties import ManyToMany, OneToMany
 
                 is_to_many = isinstance(rel_prop, (OneToMany, ManyToMany))
 
@@ -697,7 +697,7 @@ class Entity:
 
         if existing_entity:
             # UPDATE existing entity
-            from kybra_simple_db.properties import Property, Relation
+            from ic_python_db.properties import Property, Relation
 
             # Store old alias value for cleanup if it changes
             old_alias_value = None
@@ -753,7 +753,7 @@ class Entity:
 
         else:
             # CREATE new entity
-            from kybra_simple_db.properties import Property, Relation
+            from ic_python_db.properties import Property, Relation
 
             # Prepare kwargs for entity creation (exclude relations)
             kwargs = {}

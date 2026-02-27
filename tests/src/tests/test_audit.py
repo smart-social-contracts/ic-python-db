@@ -1,9 +1,9 @@
-"""Tests for audit functionality in Kybra Simple DB."""
+"""Tests for audit functionality in IC Python DB."""
 
-from kybra_simple_logging import get_logger
+from ic_python_logging import get_logger
 from tester import Tester
 
-from kybra_simple_db import *
+from ic_python_db import *
 
 logger = get_logger(__name__)
 

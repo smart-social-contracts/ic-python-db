@@ -1,7 +1,7 @@
 {
   "canisters": {
     "test": {
-      "type": "kybra",
+      "type": "basilisk",
       "main": "src/main.py"
     }
   },

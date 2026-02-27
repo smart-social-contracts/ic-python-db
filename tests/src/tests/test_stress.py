@@ -1,7 +1,7 @@
-from kybra import ic
+from basilisk import ic
 from tester import Tester  # noqa: E402
 
-from kybra_simple_db import *  # noqa: E402
+from ic_python_db import *  # noqa: E402
 
 
 class StressTestEntity(Entity):

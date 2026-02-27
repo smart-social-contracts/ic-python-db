@@ -1,8 +1,8 @@
-"""Pytest configuration and fixtures for kybra-simple-db tests."""
+"""Pytest configuration and fixtures for ic-python-db tests."""
 
 import pytest
 
-from kybra_simple_db import Database
+from ic_python_db import Database
 
 
 @pytest.fixture(autouse=True)

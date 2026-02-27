@@ -1,5 +1,5 @@
 """
-Kybra Simple DB - A lightweight key-value database with entity relationships and audit logging
+IC Python DB - A lightweight key-value database with entity relationships and audit logging
 """
 
 from .constants import ACTION_CREATE, ACTION_DELETE, ACTION_MODIFY

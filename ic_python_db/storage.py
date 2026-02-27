@@ -1,5 +1,5 @@
 """
-Storage backends for Kybra Simple DB
+Storage backends for IC Python DB
 """
 
 from abc import ABC, abstractmethod

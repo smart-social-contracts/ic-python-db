@@ -7,7 +7,7 @@ This demonstrates how to use the on_event hook to:
 - Track changes for auditing
 """
 
-from kybra_simple_db import (
+from ic_python_db import (
     Database, Entity, String, Integer,
     ACTION_CREATE, ACTION_MODIFY, ACTION_DELETE
 )

@@ -1,8 +1,8 @@
-"""Tests for schema migration functionality in Kybra Simple DB."""
+"""Tests for schema migration functionality in IC Python DB."""
 
 from tester import Tester
 
-from kybra_simple_db import *
+from ic_python_db import *
 
 
 class TestMigrations:

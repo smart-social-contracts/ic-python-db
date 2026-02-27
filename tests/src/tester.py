@@ -1,9 +1,9 @@
 import random
 import traceback
 
-from kybra_simple_logging import get_logger
+from ic_python_logging import get_logger
 
-logger = get_logger("kybra_simple_db")
+logger = get_logger("ic_python_db")
 
 
 class Tester:

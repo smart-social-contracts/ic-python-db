@@ -1,7 +1,7 @@
 """Simple access control example using on_event hooks and context manager."""
 
-from kybra_simple_db import ACTION_MODIFY, ACTION_DELETE, Database, Entity, String
-from kybra_simple_db.mixins import TimestampedMixin
+from ic_python_db import ACTION_MODIFY, ACTION_DELETE, Database, Entity, String
+from ic_python_db.mixins import TimestampedMixin
 
 
 class Document(Entity, TimestampedMixin):
@@ -12,7 +12,7 @@ class Document(Entity, TimestampedMixin):
 
     @staticmethod
     def on_event(entity, field_name, old_value, new_value, action):
-        from kybra_simple_db.context import get_caller_id
+        from ic_python_db.context import get_caller_id
 
         caller_id = get_caller_id()
 

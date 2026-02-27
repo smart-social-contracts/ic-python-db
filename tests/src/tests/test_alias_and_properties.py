@@ -2,7 +2,7 @@
 
 from tester import Tester
 
-from kybra_simple_db import Database, Entity, String
+from ic_python_db import Database, Entity, String
 
 
 class User(Entity):

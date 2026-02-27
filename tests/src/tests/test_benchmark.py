@@ -5,10 +5,10 @@ each operation. Results are returned as strings so the external orchestrator
 can parse and compare them.
 """
 
-from kybra import ic
+from basilisk import ic
 from tester import Tester
 
-from kybra_simple_db import (
+from ic_python_db import (
     Database,
     Entity,
     Integer,

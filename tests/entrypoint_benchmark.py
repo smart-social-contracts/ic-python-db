@@ -90,7 +90,7 @@ def main():
     results = {}  # (operation, db_size) -> instruction_count
 
     print(f"\n{BOLD}{'='*70}")
-    print("  kybra-simple-db Benchmark — IC Instruction Costs")
+    print("  ic-python-db Benchmark — IC Instruction Costs")
     print(f"{'='*70}{RESET}\n")
 
     total = len(DB_SIZES) * len(OPERATIONS)

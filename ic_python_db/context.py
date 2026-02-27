@@ -1,7 +1,7 @@
 """Context management for caller identity.
 
 Note: This implementation uses a simple module-level variable instead of
-contextvars.ContextVar for compatibility with the Internet Computer (Kybra)
+contextvars.ContextVar for compatibility with the Internet Computer (Basilisk)
 environment, which does not support ContextVar.
 
 This is safe because:

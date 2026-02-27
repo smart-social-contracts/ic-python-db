@@ -1,16 +1,16 @@
-# Kybra Simple DB
+# IC Python DB
 
-A lightweight key-value database with entity relationships and audit logging capabilities, intended for small to medium-sized applications running on the Internet Computer using Kybra.
+A lightweight key-value database with entity relationships and audit logging capabilities, intended for small to medium-sized applications running on the Internet Computer. Forked from [kybra-simple-db](https://github.com/smart-social-contracts/kybra-simple-db).
 
-[![Test on IC](https://github.com/smart-social-contracts/kybra-simple-db/actions/workflows/test_ic.yml/badge.svg)](https://github.com/smart-social-contracts/kybra-simple-db/actions)
-[![Test](https://github.com/smart-social-contracts/kybra-simple-db/actions/workflows/test.yml/badge.svg)](https://github.com/smart-social-contracts/kybra-simple-db/actions)
-[![PyPI version](https://badge.fury.io/py/kybra-simple-db.svg)](https://badge.fury.io/py/kybra-simple-db)
+[![Test on IC](https://github.com/smart-social-contracts/ic-python-db/actions/workflows/test_ic.yml/badge.svg)](https://github.com/smart-social-contracts/ic-python-db/actions)
+[![Test](https://github.com/smart-social-contracts/ic-python-db/actions/workflows/test.yml/badge.svg)](https://github.com/smart-social-contracts/ic-python-db/actions)
+[![PyPI version](https://badge.fury.io/py/ic-python-db.svg)](https://badge.fury.io/py/ic-python-db)
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3107/)
-[![License](https://img.shields.io/github/license/smart-social-contracts/kybra-simple-db.svg)](https://github.com/smart-social-contracts/kybra-simple-db/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/smart-social-contracts/ic-python-db.svg)](https://github.com/smart-social-contracts/ic-python-db/blob/main/LICENSE)
 
 ## Features
 
-- **Persistent Storage**: Works with Kybra's StableBTreeMap stable structure for persistent storage on your canister's stable memory so your data persists automatically across canister upgrades.
+- **Persistent Storage**: Works with StableBTreeMap stable structure for persistent storage on your canister's stable memory so your data persists automatically across canister upgrades.
 - **Entity-Relational Database**: Create, read and write entities with OneToOne, OneToMany, ManyToOne, and ManyToMany relationships.
 - **Entity Hooks**: Intercept and control entity lifecycle events (create, modify, delete) with `on_event` hooks.
 - **Access Control**: Thread-safe context management for user identity tracking and ownership-based permissions.
@@ -21,28 +21,28 @@ A lightweight key-value database with entity relationships and audit logging cap
 ## Installation
 
 ```bash
-pip install kybra-simple-db
+pip install ic-python-db
 ```
 
 ## Quick Start
 
-The database storage must be initialized before using Kybra Simple DB. Here's an example of how to do it:
+The database storage must be initialized before using IC Python DB. Here's an example of how to do it:
 
 ```python
-from kybra import StableBTreeMap
-from kybra_simple_db import Database
+from basilisk import StableBTreeMap
+from ic_python_db import Database
 
 # Initialize storage and database
 storage = StableBTreeMap[str, str](memory_id=1, max_key_size=100, max_value_size=1000)  # Use a unique memory ID for each storage instance
 Database.init(db_storage=storage)
 ```
 
-Read [Kybra's documentation](https://demergent-labs.github.io/kybra/stable_structures.html?highlight=StableBTreeMap) for more information regarding StableBTreeMap and memory IDs.
+Read [Basilisk's documentation](https://github.com/smart-social-contracts/basilisk) for more information regarding StableBTreeMap and memory IDs.
 
 Next, define your entities:
 
 ```python
-from kybra_simple_db import (
+from ic_python_db import (
     Database, Entity, String, Integer,
     OneToOne, OneToMany, ManyToOne, ManyToMany, TimestampedMixin
 )
@@ -181,7 +181,7 @@ assert admin_user._id == "1"
 Intercept and control entity changes with the `on_event` hook:
 
 ```python
-from kybra_simple_db import Entity, String, ACTION_MODIFY
+from ic_python_db import Entity, String, ACTION_MODIFY
 
 class User(Entity):
     name = String()
@@ -210,9 +210,9 @@ See [docs/HOOKS.md](docs/HOOKS.md) for more patterns.
 Thread-safe user context management with `as_user()`:
 
 ```python
-from kybra_simple_db import Database, Entity, String, ACTION_MODIFY, ACTION_DELETE
-from kybra_simple_db.mixins import TimestampedMixin
-from kybra_simple_db.context import get_caller_id
+from ic_python_db import Database, Entity, String, ACTION_MODIFY, ACTION_DELETE
+from ic_python_db.mixins import TimestampedMixin
+from ic_python_db.context import get_caller_id
 
 class Document(Entity, TimestampedMixin):
     title = String()
@@ -282,8 +282,8 @@ class User(Entity):
 
 ```bash
 # Clone the repository
-git clone https://github.com/smart-social-contracts/kybra-simple-db.git
-cd kybra-simple-db
+git clone https://github.com/smart-social-contracts/ic-python-db.git
+cd ic-python-db
 
 # Recommended setup
 pyenv install 3.10.7

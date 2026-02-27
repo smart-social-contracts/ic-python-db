@@ -1,6 +1,6 @@
-from kybra import StableBTreeMap, ic, query, update
+from basilisk import StableBTreeMap, ic, query, update
 
-from kybra_simple_db import *
+from ic_python_db import *
 from tests import (
     test_alias_and_properties,
     test_audit,

@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kybra_simple_db"
+name = "ic_python_db"
 version = "0.6.2"
-description = "A lightweight key-value database written in Python, intended for use with Kybra on the Internet Computer (IC)"
+description = "A lightweight key-value database written in Python, intended for use on the Internet Computer (IC)"
 readme = "README.md"
 authors = [
     { name = "Smart Social Contracts", email = "contact@smartsocialcontracts.org" }
@@ -26,9 +26,9 @@ requires-python = "==3.10.7"
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/smart-social-contracts/kybra-simple-db"
-Repository = "https://github.com/smart-social-contracts/kybra-simple-db.git"
-Issues = "https://github.com/smart-social-contracts/kybra-simple-db/issues"
+Homepage = "https://github.com/smart-social-contracts/ic-python-db"
+Repository = "https://github.com/smart-social-contracts/ic-python-db.git"
+Issues = "https://github.com/smart-social-contracts/ic-python-db/issues"
 
 [tool.setuptools]
-packages = ["kybra_simple_db"]
+packages = ["ic_python_db"]

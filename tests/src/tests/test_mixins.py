@@ -2,8 +2,8 @@
 
 from tester import Tester
 
-from kybra_simple_db import *
-from kybra_simple_db.context import set_caller_id
+from ic_python_db import *
+from ic_python_db.context import set_caller_id
 
 
 class TestEntity(Entity, TimestampedMixin):

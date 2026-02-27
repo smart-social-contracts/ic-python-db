@@ -1,1 +1,1 @@
-kybra-simple-logging==0.1.*
+ic-python-logging==0.1.*

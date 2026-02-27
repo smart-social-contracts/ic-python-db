@@ -1,6 +1,7 @@
+from tester import Tester  # noqa: E402
+
 from ic_python_db import *  # noqa: E402
 from ic_python_db._cdk import ic
-from tester import Tester  # noqa: E402
 
 
 class StressTestEntity(Entity):

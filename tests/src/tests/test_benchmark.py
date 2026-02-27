@@ -5,6 +5,8 @@ each operation. Results are returned as strings so the external orchestrator
 can parse and compare them.
 """
 
+from tester import Tester
+
 from ic_python_db import (
     Database,
     Entity,
@@ -14,7 +16,6 @@ from ic_python_db import (
     String,
 )
 from ic_python_db._cdk import ic
-from tester import Tester
 
 
 class BenchZone(Entity):

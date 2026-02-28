@@ -5,11 +5,7 @@ set -x
 echo "Installing dependencies..."
 pip install -r requirements.txt
 
-# Use CPython template mode for faster builds and execution
-export BASILISK_PYTHON_BACKEND=cpython
-export BASILISK_USE_TEMPLATE=true
-
-# Download CPython canister template if not present
+# Download CPython canister template if not present (CPython template mode is the default since v0.8.4)
 BASILISK_VERSION=$(python -c "import basilisk; print(basilisk.__version__)")
 TEMPLATE_DIR="$HOME/.config/basilisk/${BASILISK_VERSION}"
 TEMPLATE_PATH="${TEMPLATE_DIR}/cpython_canister_template.wasm"

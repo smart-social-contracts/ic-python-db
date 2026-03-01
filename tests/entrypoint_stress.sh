@@ -5,7 +5,7 @@ set -x
 
 echo "Installing dependencies..."
 pip install -r requirements.txt
-pip install "ic-basilisk>=0.8.7"
+pip install --no-cache-dir "ic-basilisk>=0.8.7"
 
 # Download CPython canister template if not present (CPython template mode is the default since v0.8.4)
 BASILISK_VERSION=$(python -c "import basilisk; print(basilisk.__version__)")

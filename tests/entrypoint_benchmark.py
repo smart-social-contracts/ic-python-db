@@ -66,10 +66,11 @@ def run_benchmark(operation, db_size):
         return None
 
     # Try to extract instruction count from Candid return value: (12345 : int)
+    # dfx may format with underscores as thousands separators: (4_794_528 : int)
     if stdout:
-        candid_match = re.search(r"\((\d+)\s*:\s*int\)", stdout)
+        candid_match = re.search(r"\(([\d_]+)\s*:\s*int\)", stdout)
         if candid_match:
-            val = int(candid_match.group(1))
+            val = int(candid_match.group(1).replace("_", ""))
             if val > 0:
                 return val
 

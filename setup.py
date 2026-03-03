@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="ic_python_db",
-    version="0.7.0",
+    version="0.7.1",
     author="Smart Social Contracts",
     author_email="smartsocialcontracts@gmail.com",
     description="A lightweight key-value database with entity relationships and audit logging",

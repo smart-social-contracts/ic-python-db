@@ -68,6 +68,7 @@ class TestBenchmark:
             lambda: BenchZone(name=f"Zone_{idx}", description=f"Desc_{idx}")
         )
         ic.print(f"BENCH_RESULT:create_entity:{count}:{cost}")
+        return cost
 
     def load_level1(self, count: str):
         """Measure cost of Entity.load(level=1) at given DB size."""
@@ -79,6 +80,7 @@ class TestBenchmark:
         Database.get_instance().clear_registry()
         cost, _ = _measure(lambda: BenchZone.load(zone_id, level=1))
         ic.print(f"BENCH_RESULT:load_level1:{count}:{cost}")
+        return cost
 
     def load_level3(self, count: str):
         """Measure cost of Entity.load(level=3) at given DB size."""
@@ -89,6 +91,7 @@ class TestBenchmark:
         Database.get_instance().clear_registry()
         cost, _ = _measure(lambda: BenchZone.load(zone_id, level=3))
         ic.print(f"BENCH_RESULT:load_level3:{count}:{cost}")
+        return cost
 
     def deserialize_new_level1(self, count: str):
         """Measure cost of deserialize (new entity) with level=1 at given DB size."""
@@ -104,6 +107,7 @@ class TestBenchmark:
         }
         cost, _ = _measure(lambda: Entity.deserialize(record, level=1))
         ic.print(f"BENCH_RESULT:deserialize_new_level1:{count}:{cost}")
+        return cost
 
     def deserialize_new_level3(self, count: str):
         """Measure cost of deserialize (new entity) with level=3 at given DB size."""
@@ -119,6 +123,7 @@ class TestBenchmark:
         }
         cost, _ = _measure(lambda: Entity.deserialize(record, level=3))
         ic.print(f"BENCH_RESULT:deserialize_new_level3:{count}:{cost}")
+        return cost
 
     def deserialize_existing_level1(self, count: str):
         """Measure cost of deserialize (existing entity, upsert) with level=1."""
@@ -135,6 +140,7 @@ class TestBenchmark:
         Database.get_instance().clear_registry()
         cost, _ = _measure(lambda: Entity.deserialize(record, level=1))
         ic.print(f"BENCH_RESULT:deserialize_existing_level1:{count}:{cost}")
+        return cost
 
     def deserialize_existing_level3(self, count: str):
         """Measure cost of deserialize (existing entity, upsert) with level=3."""
@@ -151,15 +157,20 @@ class TestBenchmark:
         Database.get_instance().clear_registry()
         cost, _ = _measure(lambda: Entity.deserialize(record, level=3))
         ic.print(f"BENCH_RESULT:deserialize_existing_level3:{count}:{cost}")
+        return cost
 
     def serialize(self, count: str):
         """Measure cost of Entity.serialize() at given DB size."""
         self._clear()
         count = int(count)
-        _seed_entities(count)
+        if count == 0:
+            _seed_entities(1)
+        else:
+            _seed_entities(count)
         zone = BenchZone.load(str(max(1, count)), level=1)
         cost, _ = _measure(lambda: zone.serialize())
         ic.print(f"BENCH_RESULT:serialize:{count}:{cost}")
+        return cost
 
     def bulk_deserialize_level1(self, count: str):
         """Measure cost of deserializing 10 new entities with level=1."""
@@ -182,6 +193,7 @@ class TestBenchmark:
 
         cost, _ = _measure(do_bulk)
         ic.print(f"BENCH_RESULT:bulk_deserialize_level1:{count}:{cost}")
+        return cost
 
     def bulk_deserialize_level3(self, count: str):
         """Measure cost of deserializing 10 new entities with level=3."""
@@ -204,6 +216,7 @@ class TestBenchmark:
 
         cost, _ = _measure(do_bulk)
         ic.print(f"BENCH_RESULT:bulk_deserialize_level3:{count}:{cost}")
+        return cost
 
 
 def run(test_name: str = None, test_var: str = None):

@@ -65,7 +65,15 @@ def run_benchmark(operation, db_size):
     if stdout is None:
         return None
 
-    # Extract BENCH_RESULT from stderr (ic.print goes to stderr via dfx)
+    # Try to extract instruction count from Candid return value: (12345 : int)
+    if stdout:
+        candid_match = re.search(r"\((\d+)\s*:\s*int\)", stdout)
+        if candid_match:
+            val = int(candid_match.group(1))
+            if val > 0:
+                return val
+
+    # Fallback: extract BENCH_RESULT from stderr (ic.print goes to stderr via dfx)
     all_output = (stdout or "") + "\n" + (stderr or "")
     match = re.search(r"BENCH_RESULT:\w+:\d+:(\d+)", all_output)
     if match:

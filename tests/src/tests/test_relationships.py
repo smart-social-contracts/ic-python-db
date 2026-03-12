@@ -183,9 +183,69 @@ class TestRelationships:
             assert student1 in course.students
 
 
+class BaseParent(Entity):
+    """Base entity with a OneToMany relationship."""
+
+    name = String()
+    children = OneToMany("Child", "parent")
+
+
+class DerivedParent(BaseParent):
+    """Subclass that inherits the 'children' OneToMany from BaseParent."""
+
+    extra = String()
+
+
+class Child(Entity):
+    """Entity with ManyToOne pointing to DerivedParent (reverse='children').
+
+    The 'children' OneToMany lives on BaseParent but must be found via MRO
+    when the target is a DerivedParent instance.
+    """
+
+    name = String()
+    parent = ManyToOne("DerivedParent", "children")
+
+
+class TestInheritedRelationships:
+    """Regression tests: ManyToOne must find inherited OneToMany reverse props."""
+
+    def setUp(self):
+        Database.get_instance().clear()
+
+    def test_many_to_one_with_inherited_reverse(self):
+        """ManyToOne.__set__ should walk MRO to find inherited OneToMany."""
+        parent = DerivedParent(name="Parent", extra="x")
+        child = Child(name="Child")
+
+        # This used to raise:
+        #   ValueError: Reverse property 'children' not found in DerivedParent entity
+        child.parent = parent
+
+        assert child.parent == parent
+        assert child in parent.children
+        assert len(parent.children) == 1
+
+    def test_multiple_children_with_inherited_reverse(self):
+        """Multiple children can be added to a subclassed parent."""
+        parent = DerivedParent(name="Parent", extra="y")
+        c1 = Child(name="C1")
+        c2 = Child(name="C2")
+
+        c1.parent = parent
+        c2.parent = parent
+
+        assert len(parent.children) == 2
+        assert c1.parent == parent
+        assert c2.parent == parent
+
+
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestRelationships)
-    return tester.run_tests()
+    results = tester.run_tests()
+    tester2 = Tester(TestInheritedRelationships)
+    results2 = tester2.run_tests()
+    return results or results2
 
 
 if __name__ == "__main__":

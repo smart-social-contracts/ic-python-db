@@ -558,7 +558,8 @@ class ManyToOne(Relation[E]):
             self.validate_entity(value)
 
             # Check that the reverse property is OneToMany
-            reverse_prop = value.__class__.__dict__.get(self.reverse_name)
+            # Use getattr to walk MRO so inherited relations are found
+            reverse_prop = getattr(value.__class__, self.reverse_name, None)
             if not reverse_prop:
                 raise ValueError(
                     f"Reverse property '{self.reverse_name}' not found in {value.__class__.__name__} entity"

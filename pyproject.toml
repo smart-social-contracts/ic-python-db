@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ic_python_db"
-version = "0.7.3"
+version = "0.7.4"
 description = "A lightweight key-value database written in Python, intended for use on the Internet Computer (IC)"
 readme = "README.md"
 authors = [

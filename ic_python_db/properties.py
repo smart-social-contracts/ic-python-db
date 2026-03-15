@@ -450,6 +450,8 @@ class OneToOne(Relation[E]):
 
             # Get current value if any
             current = self.__get__(obj)
+            if current is value:
+                return
             if current is not None:
                 # Remove existing relation
                 obj.remove_relation(self.name, self.reverse_name, current)
@@ -458,6 +460,8 @@ class OneToOne(Relation[E]):
             existing = value.get_relations(self.reverse_name)
             if existing:
                 existing_entity = existing[0]
+                if existing_entity is obj:
+                    return
                 # Remove the existing relation from both sides
                 existing_entity.remove_relation(self.name, self.reverse_name, value)
                 value.remove_relation(self.reverse_name, self.name, existing_entity)

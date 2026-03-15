@@ -240,12 +240,79 @@ class TestInheritedRelationships:
         assert c2.parent == parent
 
 
+class TestLoadPreservesRelations:
+    """Regression: Entity.load() must preserve relations populated by __init__.
+
+    Previously, load() unconditionally did ``entity._relations = {}`` after
+    __init__ had already resolved relation descriptors, wiping all links.
+    """
+
+    def setUp(self):
+        Database.get_instance().clear()
+
+    def test_one_to_many_survives_load(self):
+        """OneToMany relations must survive save-then-load cycle."""
+        dept = Department(name="Engineering")
+        emp1 = Employee(name="Alice")
+        emp2 = Employee(name="Bob")
+        dept.employees = [emp1, emp2]
+
+        # Sanity: relations work in memory
+        assert len(dept.employees) == 2
+        assert emp1.department == dept
+
+        # Clear entity registry so load() must reconstruct from DB
+        Database.get_instance()._entity_registry.clear()
+        Entity._context.clear()
+
+        loaded_dept = Department.load(str(dept._id))
+        assert loaded_dept is not None
+        assert len(loaded_dept.employees) == 2
+        names = {e.name for e in loaded_dept.employees}
+        assert names == {"Alice", "Bob"}
+
+    def test_many_to_one_survives_load(self):
+        """ManyToOne relations must survive save-then-load cycle."""
+        dept = Department(name="Sales")
+        emp = Employee(name="Carol")
+        emp.department = dept
+
+        assert emp.department == dept
+
+        Database.get_instance()._entity_registry.clear()
+        Entity._context.clear()
+
+        loaded_emp = Employee.load(str(emp._id))
+        assert loaded_emp is not None
+        assert loaded_emp.department is not None
+        assert loaded_emp.department.name == "Sales"
+
+    def test_one_to_one_survives_load(self):
+        """OneToOne relations must survive save-then-load cycle."""
+        person = Person(name="Dave")
+        profile = Profile(bio="Engineer")
+        person.profile = profile
+
+        assert person.profile == profile
+        assert profile.person == person
+
+        Database.get_instance()._entity_registry.clear()
+        Entity._context.clear()
+
+        loaded_person = Person.load(str(person._id))
+        assert loaded_person is not None
+        assert loaded_person.profile is not None
+        assert loaded_person.profile.bio == "Engineer"
+
+
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestRelationships)
     results = tester.run_tests()
     tester2 = Tester(TestInheritedRelationships)
     results2 = tester2.run_tests()
-    return results or results2
+    tester3 = Tester(TestLoadPreservesRelations)
+    results3 = tester3.run_tests()
+    return results or results2 or results3
 
 
 if __name__ == "__main__":

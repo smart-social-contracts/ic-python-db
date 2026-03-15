@@ -386,10 +386,12 @@ class Entity:
         # Create instance first
         entity = cls(**data, _loaded=True)
 
-        # Extract relations
-        relations = {}
+        # Restore legacy "relations" block if present in serialized data.
+        # Otherwise keep the _relations that __init__ already populated
+        # via relationship descriptors (OneToMany, ManyToOne, etc.).
         if "relations" in data:
             relations_data = data.pop("relations")
+            relations = {}
             for rel_name, rel_refs in relations_data.items():
                 relations[rel_name] = []
                 for ref in rel_refs:
@@ -400,9 +402,7 @@ class Entity:
                     )
                     if related:
                         relations[rel_name].append(related)
-
-        # Set relations after loading
-        entity._relations = relations
+            entity._relations = relations
 
         return entity
 

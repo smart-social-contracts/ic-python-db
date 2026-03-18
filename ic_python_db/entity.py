@@ -180,7 +180,8 @@ class Entity:
                 setattr(self, k, v)
         self._do_not_save = False
 
-        self._save()
+        if not self._loaded:
+            self._save()
 
     @classmethod
     def new(cls, **kwargs):
@@ -385,6 +386,10 @@ class Entity:
 
         # Create instance first
         entity = cls(**data, _loaded=True)
+
+        # If migration was applied, persist the migrated data
+        if stored_version != current_version:
+            entity._save()
 
         # Restore legacy "relations" block if present in serialized data.
         # Otherwise keep the _relations that __init__ already populated

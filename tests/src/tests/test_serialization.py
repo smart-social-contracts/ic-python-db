@@ -705,7 +705,6 @@ class TestSerialization:
         assert recreated_book.author is not None
         assert recreated_book.author.name == "Alice"
 
-
     def test_serialize_for_export_skips_one_to_many(self):
         """Test that for_export=True skips OneToMany relations."""
         Database.get_instance().clear()
@@ -745,15 +744,15 @@ class TestSerialization:
 
         # "Child" < "Parent" → Child serializes favorite_parent
         child_export = child1.serialize(for_export=True)
-        assert "favorite_parent" in child_export, (
-            "Child (alphabetically earlier) should serialize OneToOne to Parent"
-        )
+        assert (
+            "favorite_parent" in child_export
+        ), "Child (alphabetically earlier) should serialize OneToOne to Parent"
 
         # "Parent" > "Child" → Parent does NOT serialize favorite_child
         parent_export = parent.serialize(for_export=True)
-        assert "favorite_child" not in parent_export, (
-            "Parent (alphabetically later) should skip OneToOne to Child"
-        )
+        assert (
+            "favorite_child" not in parent_export
+        ), "Parent (alphabetically later) should skip OneToOne to Child"
 
         # Normal serialize includes both sides
         parent_normal = parent.serialize()
@@ -782,9 +781,13 @@ class TestSerialization:
 
         # Verify export format
         assert "children" not in parent_data, "OneToMany should be skipped"
-        assert "favorite_child" not in parent_data, "OneToOne (Parent>Child) should be skipped"
+        assert (
+            "favorite_child" not in parent_data
+        ), "OneToOne (Parent>Child) should be skipped"
         assert "parent" in child1_data, "ManyToOne should be present"
-        assert "favorite_parent" in child1_data, "OneToOne (Child<Parent) should be present"
+        assert (
+            "favorite_parent" in child1_data
+        ), "OneToOne (Child<Parent) should be present"
 
         # Clear and reimport in dependency order
         Database.get_instance().clear()
@@ -800,9 +803,15 @@ class TestSerialization:
         # Verify relations were reconstructed
         assert recreated_child1.parent == recreated_parent, "ManyToOne should resolve"
         assert recreated_child2.parent == recreated_parent, "ManyToOne should resolve"
-        assert recreated_child1.favorite_parent == recreated_parent, "OneToOne should resolve"
-        assert len(recreated_parent.children) == 2, "OneToMany should be reconstructed from ManyToOne"
-        assert recreated_parent.favorite_child == recreated_child1, "OneToOne reverse should be set"
+        assert (
+            recreated_child1.favorite_parent == recreated_parent
+        ), "OneToOne should resolve"
+        assert (
+            len(recreated_parent.children) == 2
+        ), "OneToMany should be reconstructed from ManyToOne"
+        assert (
+            recreated_parent.favorite_child == recreated_child1
+        ), "OneToOne reverse should be set"
 
     def test_serialize_for_export_many_to_many(self):
         """Test that for_export keeps ManyToMany (self-referential)."""
@@ -816,7 +825,6 @@ class TestSerialization:
         export_data = child1.serialize(for_export=True)
         # ManyToMany with same type: "Child" <= "Child" → serialize
         assert "siblings" in export_data, "Self-referential ManyToMany should be kept"
-
 
     # ── Issue #4 regression tests ──────────────────────────────────────────
 
@@ -860,23 +868,27 @@ class TestSerialization:
         member_data = member.serialize(for_export=True)
 
         # User should NOT have 'member' (since "User" > "Member4")
-        assert "member" not in user_data, (
-            f"for_export should skip OneToOne on alphabetically-later side; got {user_data}"
-        )
+        assert (
+            "member" not in user_data
+        ), f"for_export should skip OneToOne on alphabetically-later side; got {user_data}"
         # Member4 SHOULD have 'user' (since "Member4" < "User")
-        assert "user" in member_data, (
-            f"for_export should keep OneToOne on alphabetically-earlier side; got {member_data}"
-        )
+        assert (
+            "user" in member_data
+        ), f"for_export should keep OneToOne on alphabetically-earlier side; got {member_data}"
         assert member_data["user"] == "system"  # alias
 
         # Clear and reimport in dependency order
         Database.get_instance().clear()
         recreated_user = User.deserialize(user_data)  # No member ref → no crash
-        recreated_member = Member4.deserialize(member_data)  # user ref → resolves to existing User
+        recreated_member = Member4.deserialize(
+            member_data
+        )  # user ref → resolves to existing User
 
         # Both sides should be reconstructed
         assert recreated_member.user == recreated_user, "ManyToOne should resolve"
-        assert recreated_user.member == recreated_member, "Reverse OneToOne should be set"
+        assert (
+            recreated_user.member == recreated_member
+        ), "Reverse OneToOne should be set"
 
         # ── Part 2: OLD serialize() would crash on wrong import order ──
         Database.get_instance().clear()
@@ -887,16 +899,20 @@ class TestSerialization:
 
         # Normal serialize includes BOTH sides
         user2_full = user2.serialize()
-        member2_full = member2.serialize()
+        _ = member2.serialize()  # noqa: F841
         assert "member" in user2_full, "Normal serialize should include both sides"
 
         # Importing User first with normal data crashes because Member doesn't exist
         Database.get_instance().clear()
         try:
-            User.deserialize(user2_full)  # has member: "mem_deadbeef" → Member4 doesn't exist
+            User.deserialize(
+                user2_full
+            )  # has member: "mem_deadbeef" → Member4 doesn't exist
             # If deserialize silently skips, that's also fine (it catches ValueError)
         except ValueError as e:
-            assert "mem_deadbeef" in str(e), f"Should reference the missing member alias: {e}"
+            assert "mem_deadbeef" in str(
+                e
+            ), f"Should reference the missing member alias: {e}"
 
     def test_issue4_one_to_many_dangling_refs_load_some(self):
         """Regression test for issue #4: OneToMany with dangling refs crashes load_some.
@@ -981,9 +997,9 @@ class TestSerialization:
         Balance4.deserialize(b1_data)
         Balance4.deserialize(b2_data)
 
-        assert len(reimported_token.balances) == 2, (
-            "OneToMany should be reconstructed from ManyToOne during import"
-        )
+        assert (
+            len(reimported_token.balances) == 2
+        ), "OneToMany should be reconstructed from ManyToOne during import"
 
     def test_issue4_full_round_trip_bidirectional(self):
         """End-to-end test: serialize(for_export=True) → clear → deserialize.
@@ -1052,8 +1068,10 @@ class TestSerialization:
         # Use specific classes (Database.clear() wipes entity type registry,
         # so generic Entity.deserialize can't resolve locally-defined classes)
         type_map = {
-            "Realm4": Realm4, "User4": User4,
-            "Human4": Human4, "Member44": Member44,
+            "Realm4": Realm4,
+            "User4": User4,
+            "Human4": Human4,
+            "Member44": Member44,
         }
         for item in all_data:
             type_map[item["_type"]].deserialize(item)

@@ -615,7 +615,12 @@ class Entity:
             if rel_entities:
                 # Check if this is a *ToMany relation that should always be a list
                 rel_prop = getattr(self.__class__, rel_name, None)
-                from ic_python_db.properties import ManyToMany, ManyToOne, OneToMany, OneToOne
+                from ic_python_db.properties import (
+                    ManyToMany,
+                    ManyToOne,
+                    OneToMany,
+                    OneToOne,
+                )
 
                 if for_export:
                     # Skip OneToMany — always reconstructed from reverse ManyToOne

@@ -264,8 +264,8 @@ class Entity:
                     )
             self._update_timestamps(caller_id)
 
-        # Save to database
-        data = self.serialize()
+        # Save to database (full serialization preserves all relations)
+        data = self._serialize_full()
 
         if not self._do_not_save:
             logger.debug(f"Saving entity {self._type}@{self._id} to database")
@@ -511,9 +511,14 @@ class Entity:
 
         while len(ret) < count and from_id <= cls.max_id():
             logger.info(f"Loading entity {from_id}")
-            entity = cls.load(str(from_id))
-            if entity:
-                ret.append(entity)
+            try:
+                entity = cls.load(str(from_id))
+                if entity:
+                    ret.append(entity)
+            except (ValueError, AttributeError) as e:
+                # Skip entities with broken/dangling relation references
+                # (full fix: issue #4 — lazy relation resolution)
+                logger.warning(f"Skipping {cls.__name__}@{from_id}: {e}")
             from_id += 1
 
         return ret
@@ -559,19 +564,15 @@ class Entity:
         # Remove from context
         self.__class__._context.discard(self)
 
-    def serialize(self) -> Dict[str, Any]:
-        """Convert the entity to a serializable dictionary.
-
-        Returns:
-            Dict containing the entity's serializable data
-        """
+    def _serialize_base(self) -> Dict[str, Any]:
+        """Shared serialization logic: core data, properties, and instance attributes."""
         # Get mixin data first if available
         data = super().serialize() if hasattr(super(), "serialize") else {}
 
         # Add core entity data
         data.update(
             {
-                "_type": self._type,  # Use the entity type
+                "_type": self._type,
                 "_id": self._id,
             }
         )
@@ -589,30 +590,74 @@ class Entity:
             if not k.startswith("_"):
                 data[k] = v
 
-        # Add relations as references (prefer alias over _id if available)
-        def get_entity_reference(entity):
-            """Get the best reference for an entity: alias value if available, otherwise _id."""
-            if hasattr(entity.__class__, "__alias__") and entity.__class__.__alias__:
-                alias_field = entity.__class__.__alias__
-                alias_value = getattr(entity, alias_field, None)
-                if alias_value is not None:
-                    return alias_value
-            return entity._id
+        return data
+
+    @staticmethod
+    def _get_entity_reference(entity):
+        """Get the best reference for an entity: alias value if available, otherwise _id."""
+        if hasattr(entity.__class__, "__alias__") and entity.__class__.__alias__:
+            alias_field = entity.__class__.__alias__
+            alias_value = getattr(entity, alias_field, None)
+            if alias_value is not None:
+                return alias_value
+        return entity._id
+
+    def _serialize_full(self) -> Dict[str, Any]:
+        """Full serialization including all relations. Used by _save() for persistence."""
+        data = self._serialize_base()
+
+        from ic_python_db.properties import ManyToMany, OneToMany
 
         for rel_name, rel_entities in self._relations.items():
             if rel_entities:
-                # Check if this is a *ToMany relation that should always be a list
                 rel_prop = getattr(self.__class__, rel_name, None)
-                from ic_python_db.properties import ManyToMany, OneToMany
+                is_to_many = isinstance(rel_prop, (OneToMany, ManyToMany))
+
+                if len(rel_entities) == 1 and not is_to_many:
+                    data[rel_name] = self._get_entity_reference(rel_entities[0])
+                else:
+                    data[rel_name] = [
+                        self._get_entity_reference(e) for e in rel_entities
+                    ]
+
+        return data
+
+    def serialize(self) -> Dict[str, Any]:
+        """Convert the entity to a portable serializable dictionary.
+
+        OneToMany relations are skipped (reconstructed from reverse ManyToOne).
+        For bilateral OneToOne relations, only the alphabetically-earlier entity
+        type serializes the reference, avoiding circular dependencies.
+
+        Returns:
+            Dict containing the entity's serializable data
+        """
+        data = self._serialize_base()
+
+        from ic_python_db.properties import ManyToMany, OneToMany, OneToOne
+
+        for rel_name, rel_entities in self._relations.items():
+            if rel_entities:
+                rel_prop = getattr(self.__class__, rel_name, None)
+
+                # Skip OneToMany — always reconstructed from reverse ManyToOne
+                if isinstance(rel_prop, OneToMany):
+                    continue
+                # For OneToOne bilateral, only serialize on one deterministic side:
+                # the entity whose type name is alphabetically <= the target type.
+                if isinstance(rel_prop, OneToOne):
+                    target_type = rel_entities[0]._type if rel_entities else None
+                    if target_type and self._type > target_type:
+                        continue
 
                 is_to_many = isinstance(rel_prop, (OneToMany, ManyToMany))
 
                 if len(rel_entities) == 1 and not is_to_many:
-                    # Single relation for OneToOne/ManyToOne - store as single reference
-                    data[rel_name] = get_entity_reference(rel_entities[0])
+                    data[rel_name] = self._get_entity_reference(rel_entities[0])
                 else:
-                    # Multiple relations or *ToMany relations - store as list of references
-                    data[rel_name] = [get_entity_reference(e) for e in rel_entities]
+                    data[rel_name] = [
+                        self._get_entity_reference(e) for e in rel_entities
+                    ]
 
         return data
 

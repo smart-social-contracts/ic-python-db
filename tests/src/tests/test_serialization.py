@@ -32,7 +32,12 @@ class TestSerialization:
         Database.get_instance().clear()
 
     def test_serialization_format(self):
-        """Test that relations are serialized in the correct format."""
+        """Test that relations are serialized in the correct format.
+
+        OneToMany is always skipped (reconstructed from reverse ManyToOne).
+        OneToOne is serialized only on the alphabetically-earlier entity type side.
+        "Child" < "Parent" → Child serializes favorite_parent; Parent skips favorite_child.
+        """
 
         # Create entities
         parent = Parent(name="Alice")
@@ -48,21 +53,19 @@ class TestSerialization:
         parent_data = parent.serialize()
         child1_data = child1.serialize()
 
-        # OneToMany should always be a list, even with single item
-        assert isinstance(
-            parent_data["children"], list
-        ), "OneToMany should serialize as list"
-        assert parent_data["children"] == [
-            child1._id
-        ], f"Expected ['{child1._id}'], got {parent_data['children']}"
+        # OneToMany is always skipped in serialize
+        assert "children" not in parent_data, "OneToMany should be skipped"
 
-        # OneToOne should be a single value
-        assert isinstance(
-            parent_data["favorite_child"], str
-        ), "OneToOne should serialize as single value"
+        # OneToOne: "Parent" > "Child" → Parent skips favorite_child
         assert (
-            parent_data["favorite_child"] == child1._id
-        ), f"Expected '{child1._id}', got {parent_data['favorite_child']}"
+            "favorite_child" not in parent_data
+        ), "OneToOne on alphabetically-later side should be skipped"
+
+        # OneToOne: "Child" < "Parent" → Child serializes favorite_parent
+        assert isinstance(
+            child1_data["favorite_parent"], str
+        ), "OneToOne on alphabetically-earlier side should serialize as single value"
+        assert child1_data["favorite_parent"] == parent._id
 
         # ManyToOne should be a single value
         assert isinstance(
@@ -80,45 +83,11 @@ class TestSerialization:
             child2._id
         ], f"Expected ['{child2._id}'], got {child1_data['siblings']}"
 
-        # Test string representation of serialized data
-        parent_str = str(parent_data)
-        child1_str = str(child1_data)
-
-        # Verify OneToMany appears as list in string format
-        assert (
-            f"'children': ['{child1._id}']" in parent_str
-        ), f"OneToMany should appear as list in string: {parent_str}"
-
-        # Verify OneToOne appears as single value in string format
-        assert (
-            f"'favorite_child': '{child1._id}'" in parent_str
-        ), f"OneToOne should appear as single value in string: {parent_str}"
-
-        # Verify ManyToOne appears as single value in string format
-        assert (
-            f"'parent': '{parent._id}'" in child1_str
-        ), f"ManyToOne should appear as single value in string: {child1_str}"
-
-        # Verify ManyToMany appears as list in string format
-        assert (
-            f"'siblings': ['{child2._id}']" in child1_str
-        ), f"ManyToMany should appear as list in string: {child1_str}"
-
         # Test with multiple items
         child3 = Child(name="David")
-        parent.children = [child1, child3]  # OneToMany with multiple items
         child1.siblings = [child2, child3]  # ManyToMany with multiple items
 
-        parent_data = parent.serialize()
         child1_data = child1.serialize()
-
-        # Should still be lists
-        assert isinstance(
-            parent_data["children"], list
-        ), "OneToMany should serialize as list"
-        assert (
-            len(parent_data["children"]) == 2
-        ), "OneToMany should contain both children"
 
         assert isinstance(
             child1_data["siblings"], list
@@ -127,10 +96,7 @@ class TestSerialization:
             len(child1_data["siblings"]) == 2
         ), "ManyToMany should contain both siblings"
 
-        assert (
-            str(parent_data)
-            == "{'_type': 'Parent', '_id': '1', 'name': 'Alice', 'children': ['1', '3'], 'favorite_child': '1'}"
-        )
+        assert str(parent_data) == "{'_type': 'Parent', '_id': '1', 'name': 'Alice'}"
         assert (
             str(child1_data)
             == "{'_type': 'Child', '_id': '1', 'name': 'Bob', 'parent': '1', 'favorite_parent': '1', 'siblings': ['2', '3']}"
@@ -195,7 +161,12 @@ class TestSerialization:
         assert result._id is not None, "Should auto-generate _id"
 
     def test_round_trip_serialization(self):
-        """Test that serialize -> deserialize produces equivalent entities."""
+        """Test that serialize -> deserialize produces equivalent entities.
+
+        Import order: Parent first (no forward refs), then Children (ManyToOne
+        + OneToOne refs to Parent). OneToMany on Parent is reconstructed from
+        ManyToOne on Children.
+        """
         Database.get_instance().clear()
 
         # Create entities with complex relationships
@@ -216,17 +187,23 @@ class TestSerialization:
         child2_data = child2.serialize()
         child3_data = child3.serialize()
 
+        # Parent should have no forward refs (OneToMany + OneToOne skipped)
+        assert "children" not in parent_data
+        assert "favorite_child" not in parent_data
+
+        # Children carry ManyToOne + OneToOne refs
+        assert "parent" in child1_data
+        assert "favorite_parent" in child1_data
+
         # Clear and recreate from serialized data
         Database.get_instance().clear()
 
-        # Recreate entities (order matters for relations)
+        # Import order: Parent first, then Children
+        recreated_parent = Parent.deserialize(parent_data)
         Child.deserialize(child3_data)
         Child.deserialize(child2_data)
         recreated_child1 = Child.deserialize(child1_data)
-        recreated_parent = Parent.deserialize(parent_data)
 
-        # Relations are attempted to be resolved immediately during deserialize
-        # (unresolvable relations are silently skipped)
         # Verify the recreated entities have the same serialized output
         recreated_parent_data = recreated_parent.serialize()
         recreated_child1_data = recreated_child1.serialize()
@@ -236,7 +213,6 @@ class TestSerialization:
         print(f"Original child1: {child1_data}")
         print(f"Recreated child1: {recreated_child1_data}")
 
-        # Verify that serialized data matches (allowing for different ordering in many-to-many relations)
         assert (
             recreated_parent_data == parent_data
         ), f"Parent data mismatch:\nOriginal: {parent_data}\nRecreated: {recreated_parent_data}"
@@ -256,7 +232,7 @@ class TestSerialization:
         assert recreated_parent.name == "Alice"
         assert recreated_child1.name == "Bob"
 
-        # Verify relations are properly restored
+        # Verify relations are properly restored via reverse links
         assert len(recreated_parent.children) == 2, "Parent should have 2 children"
         assert (
             recreated_parent.favorite_child is not None
@@ -705,8 +681,8 @@ class TestSerialization:
         assert recreated_book.author is not None
         assert recreated_book.author.name == "Alice"
 
-    def test_serialize_for_export_skips_one_to_many(self):
-        """Test that for_export=True skips OneToMany relations."""
+    def test_serialize_skips_one_to_many(self):
+        """Test that serialize() always skips OneToMany relations."""
         Database.get_instance().clear()
 
         parent = Parent(name="Alice")
@@ -717,21 +693,17 @@ class TestSerialization:
         child1.parent = parent
         child2.parent = parent
 
-        # Normal serialize includes OneToMany
-        normal_data = parent.serialize()
-        assert "children" in normal_data, "Normal serialize should include OneToMany"
-
-        # Export serialize skips OneToMany
-        export_data = parent.serialize(for_export=True)
-        assert "children" not in export_data, "Export serialize should skip OneToMany"
+        # serialize skips OneToMany
+        data = parent.serialize()
+        assert "children" not in data, "serialize should skip OneToMany"
 
         # ManyToOne is always included
-        child_data = child1.serialize(for_export=True)
-        assert "parent" in child_data, "Export serialize should keep ManyToOne"
+        child_data = child1.serialize()
+        assert "parent" in child_data, "serialize should keep ManyToOne"
         assert child_data["parent"] == parent._id
 
-    def test_serialize_for_export_one_to_one_deterministic(self):
-        """Test that for_export=True serializes OneToOne on only one deterministic side.
+    def test_serialize_one_to_one_deterministic(self):
+        """Test that serialize() emits OneToOne on only one deterministic side.
 
         Rule: serialize only if self._type <= target._type (alphabetically).
         """
@@ -743,78 +715,19 @@ class TestSerialization:
         parent.favorite_child = child1
 
         # "Child" < "Parent" → Child serializes favorite_parent
-        child_export = child1.serialize(for_export=True)
+        child_data = child1.serialize()
         assert (
-            "favorite_parent" in child_export
+            "favorite_parent" in child_data
         ), "Child (alphabetically earlier) should serialize OneToOne to Parent"
 
         # "Parent" > "Child" → Parent does NOT serialize favorite_child
-        parent_export = parent.serialize(for_export=True)
-        assert (
-            "favorite_child" not in parent_export
-        ), "Parent (alphabetically later) should skip OneToOne to Child"
-
-        # Normal serialize includes both sides
-        parent_normal = parent.serialize()
-        assert "favorite_child" in parent_normal
-
-    def test_serialize_for_export_round_trip(self):
-        """Test that for_export serialization can be imported back correctly.
-
-        Import order: Parent first, then Children (children carry ManyToOne refs).
-        OneToMany on Parent is reconstructed from ManyToOne on Children.
-        """
-        Database.get_instance().clear()
-
-        parent = Parent(name="Alice")
-        child1 = Child(name="Bob")
-        child2 = Child(name="Charlie")
-
-        parent.children = [child1, child2]
-        parent.favorite_child = child1
-        child1.siblings = [child2]
-
-        # Serialize for export
-        parent_data = parent.serialize(for_export=True)
-        child1_data = child1.serialize(for_export=True)
-        child2_data = child2.serialize(for_export=True)
-
-        # Verify export format
-        assert "children" not in parent_data, "OneToMany should be skipped"
+        parent_data = parent.serialize()
         assert (
             "favorite_child" not in parent_data
-        ), "OneToOne (Parent>Child) should be skipped"
-        assert "parent" in child1_data, "ManyToOne should be present"
-        assert (
-            "favorite_parent" in child1_data
-        ), "OneToOne (Child<Parent) should be present"
+        ), "Parent (alphabetically later) should skip OneToOne to Child"
 
-        # Clear and reimport in dependency order
-        Database.get_instance().clear()
-
-        # Parent first (no forward refs in export)
-        recreated_parent = Parent.deserialize(parent_data)
-        assert recreated_parent.name == "Alice"
-
-        # Children second (have ManyToOne + OneToOne refs to Parent)
-        recreated_child2 = Child.deserialize(child2_data)
-        recreated_child1 = Child.deserialize(child1_data)
-
-        # Verify relations were reconstructed
-        assert recreated_child1.parent == recreated_parent, "ManyToOne should resolve"
-        assert recreated_child2.parent == recreated_parent, "ManyToOne should resolve"
-        assert (
-            recreated_child1.favorite_parent == recreated_parent
-        ), "OneToOne should resolve"
-        assert (
-            len(recreated_parent.children) == 2
-        ), "OneToMany should be reconstructed from ManyToOne"
-        assert (
-            recreated_parent.favorite_child == recreated_child1
-        ), "OneToOne reverse should be set"
-
-    def test_serialize_for_export_many_to_many(self):
-        """Test that for_export keeps ManyToMany (self-referential)."""
+    def test_serialize_keeps_many_to_many(self):
+        """Test that serialize keeps ManyToMany (self-referential)."""
         Database.get_instance().clear()
 
         child1 = Child(name="Bob")
@@ -822,9 +735,8 @@ class TestSerialization:
 
         child1.siblings = [child2]
 
-        export_data = child1.serialize(for_export=True)
-        # ManyToMany with same type: "Child" <= "Child" → serialize
-        assert "siblings" in export_data, "Self-referential ManyToMany should be kept"
+        data = child1.serialize()
+        assert "siblings" in data, "Self-referential ManyToMany should be kept"
 
     # ── Issue #4 regression tests ──────────────────────────────────────────
 
@@ -837,8 +749,8 @@ class TestSerialization:
         crashing with:
             ValueError: No entity of types Member found with ID or name 'mem_xxx'
 
-        The fix: serialize(for_export=True) skips the OneToOne on the
-        alphabetically-later side ("User" > "Member" → User.member is skipped).
+        The fix: serialize() skips the OneToOne on the alphabetically-later
+        side ("User" > "Member4" → User.member is skipped).
         Import order: User first (no member ref), Member second (user ref resolves).
         """
         Database.get_instance().clear()
@@ -863,18 +775,18 @@ class TestSerialization:
         assert user.member == member
         assert member.user == user
 
-        # ── Part 1: for_export=True produces importable JSON ──
-        user_data = user.serialize(for_export=True)
-        member_data = member.serialize(for_export=True)
+        # serialize() produces importable JSON
+        user_data = user.serialize()
+        member_data = member.serialize()
 
         # User should NOT have 'member' (since "User" > "Member4")
         assert (
             "member" not in user_data
-        ), f"for_export should skip OneToOne on alphabetically-later side; got {user_data}"
+        ), f"Should skip OneToOne on alphabetically-later side; got {user_data}"
         # Member4 SHOULD have 'user' (since "Member4" < "User")
         assert (
             "user" in member_data
-        ), f"for_export should keep OneToOne on alphabetically-earlier side; got {member_data}"
+        ), f"Should keep OneToOne on alphabetically-earlier side; got {member_data}"
         assert member_data["user"] == "system"  # alias
 
         # Clear and reimport in dependency order
@@ -885,44 +797,16 @@ class TestSerialization:
         )  # user ref → resolves to existing User
 
         # Both sides should be reconstructed
-        assert recreated_member.user == recreated_user, "ManyToOne should resolve"
+        assert recreated_member.user == recreated_user, "OneToOne should resolve"
         assert (
             recreated_user.member == recreated_member
         ), "Reverse OneToOne should be set"
 
-        # ── Part 2: OLD serialize() would crash on wrong import order ──
-        Database.get_instance().clear()
+    def test_issue4_load_some_resilience(self):
+        """Regression test for issue #4: load_some resilience with dangling refs.
 
-        user2 = User(name="alice")
-        member2 = Member4(id="mem_deadbeef")
-        member2.user = user2
-
-        # Normal serialize includes BOTH sides
-        user2_full = user2.serialize()
-        _ = member2.serialize()  # noqa: F841
-        assert "member" in user2_full, "Normal serialize should include both sides"
-
-        # Importing User first with normal data crashes because Member doesn't exist
-        Database.get_instance().clear()
-        try:
-            User.deserialize(
-                user2_full
-            )  # has member: "mem_deadbeef" → Member4 doesn't exist
-            # If deserialize silently skips, that's also fine (it catches ValueError)
-        except ValueError as e:
-            assert "mem_deadbeef" in str(
-                e
-            ), f"Should reference the missing member alias: {e}"
-
-    def test_issue4_one_to_many_dangling_refs_load_some(self):
-        """Regression test for issue #4: OneToMany with dangling refs crashes load_some.
-
-        Reproduces the runtime crash: Token stored with balances: [4, 5, 6] but
-        WalletBalance entities were deleted. Token.load_some() crashes with:
-            ValueError: No entity of types WalletBalance found with ID or name '4'
-
-        The fix: load_some() catches ValueError/AttributeError and skips broken
-        entities instead of crashing the entire batch.
+        load_some() catches ValueError/AttributeError per entity and skips
+        broken entities instead of crashing the entire batch.
         """
         Database.get_instance().clear()
 
@@ -942,11 +826,7 @@ class TestSerialization:
         e2.account = acct
         assert len(acct.entries) == 2
 
-        # Serialize WITH OneToMany (internal storage format)
-        acct_data = acct.serialize()
-        assert "entries" in acct_data
-
-        # Now delete the entries from DB but leave the account's stored data intact
+        # Delete entries from DB but leave account's stored data intact
         e1.delete()
         e2.delete()
 
@@ -955,15 +835,13 @@ class TestSerialization:
 
         # load_some should NOT crash — it should skip broken entities
         loaded = Account.load_some(from_id=1, count=10)
-        # The account itself should still load (its entries will fail silently)
-        assert len(loaded) >= 0, "load_some should not crash on dangling OneToMany refs"
+        assert len(loaded) >= 0, "load_some should not crash on dangling refs"
 
-    def test_issue4_for_export_eliminates_dangling_one_to_many(self):
-        """Regression test: for_export=True prevents OneToMany dangling refs entirely.
+    def test_issue4_serialize_eliminates_dangling_one_to_many(self):
+        """Regression test: serialize() prevents OneToMany dangling refs.
 
-        If Token was serialized with for_export=True, the 'balances' OneToMany field
-        is not included. On import, Token has no forward refs to WalletBalance,
-        so there's nothing to dangle.
+        Since serialize() never includes OneToMany, Token has no forward refs
+        to WalletBalance, so there's nothing to dangle on import.
         """
         Database.get_instance().clear()
 
@@ -981,19 +859,20 @@ class TestSerialization:
         b1.token = token
         b2.token = token
 
-        # for_export skips OneToMany
-        export_data = token.serialize(for_export=True)
-        assert "balances" not in export_data
+        # serialize skips OneToMany
+        token_data = token.serialize()
+        assert "balances" not in token_data
+
+        b1_data = b1.serialize()
+        b2_data = b2.serialize()
 
         # Import token without balance refs — no crash possible
         Database.get_instance().clear()
-        reimported_token = Token4.deserialize(export_data)
+        reimported_token = Token4.deserialize(token_data)
         assert reimported_token.name == "ICP"
         assert len(reimported_token.balances) == 0  # No balances yet
 
         # Now import balances with ManyToOne ref — reconstructs OneToMany
-        b1_data = b1.serialize(for_export=True)
-        b2_data = b2.serialize(for_export=True)
         Balance4.deserialize(b1_data)
         Balance4.deserialize(b2_data)
 
@@ -1002,7 +881,7 @@ class TestSerialization:
         ), "OneToMany should be reconstructed from ManyToOne during import"
 
     def test_issue4_full_round_trip_bidirectional(self):
-        """End-to-end test: serialize(for_export=True) → clear → deserialize.
+        """End-to-end test: serialize() → clear → deserialize.
 
         Models the exact realm workflow: generate entities in memory,
         serialize to JSON, clear DB, import in dependency order.
@@ -1044,17 +923,17 @@ class TestSerialization:
             assert users[i].member == members[i]
             assert users[i].human == humans[i]
 
-        # Serialize for export (dependency order: Realm → Users → Humans → Members)
+        # Serialize (dependency order: Realm → Users → Humans → Members)
         all_data = (
-            [realm.serialize(for_export=True)]
-            + [u.serialize(for_export=True) for u in users]
-            + [h.serialize(for_export=True) for h in humans]
-            + [m.serialize(for_export=True) for m in members]
+            [realm.serialize()]
+            + [u.serialize() for u in users]
+            + [h.serialize() for h in humans]
+            + [m.serialize() for m in members]
         )
 
-        # Verify no OneToMany or wrong-side OneToOne in export
+        # Verify no OneToMany or wrong-side OneToOne
         realm_data = all_data[0]
-        assert "users" not in realm_data, "OneToMany should not be in export"
+        assert "users" not in realm_data, "OneToMany should not be serialized"
         user_data = all_data[1]
         # "User4" > "Human4" → User4 should NOT have human
         assert "human" not in user_data, "OneToOne (User4>Human4) should be skipped"

@@ -564,15 +564,13 @@ class Entity:
         # Remove from context
         self.__class__._context.discard(self)
 
-    def serialize(self, for_export: bool = False) -> Dict[str, Any]:
+    def serialize(self) -> Dict[str, Any]:
         """Convert the entity to a serializable dictionary.
 
-        Args:
-            for_export: If True, produce a portable representation suitable for
-                importing into a different database/canister. This skips
-                OneToMany relations (reconstructed from reverse ManyToOne) and
-                serializes OneToOne only on one deterministic side to avoid
-                circular reference issues during import.
+        OneToMany relations are always skipped (they are reconstructed from the
+        reverse ManyToOne side). For bilateral OneToOne relations, only the
+        alphabetically-earlier entity type serializes the reference, avoiding
+        circular dependencies during sequential import.
 
         Returns:
             Dict containing the entity's serializable data
@@ -617,22 +615,20 @@ class Entity:
                 rel_prop = getattr(self.__class__, rel_name, None)
                 from ic_python_db.properties import (
                     ManyToMany,
-                    ManyToOne,
                     OneToMany,
                     OneToOne,
                 )
 
-                if for_export:
-                    # Skip OneToMany — always reconstructed from reverse ManyToOne
-                    if isinstance(rel_prop, OneToMany):
+                # Skip OneToMany — always reconstructed from reverse ManyToOne
+                if isinstance(rel_prop, OneToMany):
+                    continue
+                # For OneToOne bilateral, only serialize on one deterministic side:
+                # the entity whose type name is alphabetically <= the target type.
+                # This ensures exactly one side carries the reference.
+                if isinstance(rel_prop, OneToOne):
+                    target_type = rel_entities[0]._type if rel_entities else None
+                    if target_type and self._type > target_type:
                         continue
-                    # For OneToOne bilateral, only serialize on one deterministic side:
-                    # the entity whose type name is alphabetically <= the target type.
-                    # This ensures exactly one side carries the reference.
-                    if isinstance(rel_prop, OneToOne):
-                        target_type = rel_entities[0]._type if rel_entities else None
-                        if target_type and self._type > target_type:
-                            continue
 
                 is_to_many = isinstance(rel_prop, (OneToMany, ManyToMany))
 

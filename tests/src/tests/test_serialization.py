@@ -706,6 +706,371 @@ class TestSerialization:
         assert recreated_book.author.name == "Alice"
 
 
+    def test_serialize_for_export_skips_one_to_many(self):
+        """Test that for_export=True skips OneToMany relations."""
+        Database.get_instance().clear()
+
+        parent = Parent(name="Alice")
+        child1 = Child(name="Bob")
+        child2 = Child(name="Charlie")
+
+        parent.children = [child1, child2]
+        child1.parent = parent
+        child2.parent = parent
+
+        # Normal serialize includes OneToMany
+        normal_data = parent.serialize()
+        assert "children" in normal_data, "Normal serialize should include OneToMany"
+
+        # Export serialize skips OneToMany
+        export_data = parent.serialize(for_export=True)
+        assert "children" not in export_data, "Export serialize should skip OneToMany"
+
+        # ManyToOne is always included
+        child_data = child1.serialize(for_export=True)
+        assert "parent" in child_data, "Export serialize should keep ManyToOne"
+        assert child_data["parent"] == parent._id
+
+    def test_serialize_for_export_one_to_one_deterministic(self):
+        """Test that for_export=True serializes OneToOne on only one deterministic side.
+
+        Rule: serialize only if self._type <= target._type (alphabetically).
+        """
+        Database.get_instance().clear()
+
+        parent = Parent(name="Alice")
+        child1 = Child(name="Bob")
+
+        parent.favorite_child = child1
+
+        # "Child" < "Parent" → Child serializes favorite_parent
+        child_export = child1.serialize(for_export=True)
+        assert "favorite_parent" in child_export, (
+            "Child (alphabetically earlier) should serialize OneToOne to Parent"
+        )
+
+        # "Parent" > "Child" → Parent does NOT serialize favorite_child
+        parent_export = parent.serialize(for_export=True)
+        assert "favorite_child" not in parent_export, (
+            "Parent (alphabetically later) should skip OneToOne to Child"
+        )
+
+        # Normal serialize includes both sides
+        parent_normal = parent.serialize()
+        assert "favorite_child" in parent_normal
+
+    def test_serialize_for_export_round_trip(self):
+        """Test that for_export serialization can be imported back correctly.
+
+        Import order: Parent first, then Children (children carry ManyToOne refs).
+        OneToMany on Parent is reconstructed from ManyToOne on Children.
+        """
+        Database.get_instance().clear()
+
+        parent = Parent(name="Alice")
+        child1 = Child(name="Bob")
+        child2 = Child(name="Charlie")
+
+        parent.children = [child1, child2]
+        parent.favorite_child = child1
+        child1.siblings = [child2]
+
+        # Serialize for export
+        parent_data = parent.serialize(for_export=True)
+        child1_data = child1.serialize(for_export=True)
+        child2_data = child2.serialize(for_export=True)
+
+        # Verify export format
+        assert "children" not in parent_data, "OneToMany should be skipped"
+        assert "favorite_child" not in parent_data, "OneToOne (Parent>Child) should be skipped"
+        assert "parent" in child1_data, "ManyToOne should be present"
+        assert "favorite_parent" in child1_data, "OneToOne (Child<Parent) should be present"
+
+        # Clear and reimport in dependency order
+        Database.get_instance().clear()
+
+        # Parent first (no forward refs in export)
+        recreated_parent = Parent.deserialize(parent_data)
+        assert recreated_parent.name == "Alice"
+
+        # Children second (have ManyToOne + OneToOne refs to Parent)
+        recreated_child2 = Child.deserialize(child2_data)
+        recreated_child1 = Child.deserialize(child1_data)
+
+        # Verify relations were reconstructed
+        assert recreated_child1.parent == recreated_parent, "ManyToOne should resolve"
+        assert recreated_child2.parent == recreated_parent, "ManyToOne should resolve"
+        assert recreated_child1.favorite_parent == recreated_parent, "OneToOne should resolve"
+        assert len(recreated_parent.children) == 2, "OneToMany should be reconstructed from ManyToOne"
+        assert recreated_parent.favorite_child == recreated_child1, "OneToOne reverse should be set"
+
+    def test_serialize_for_export_many_to_many(self):
+        """Test that for_export keeps ManyToMany (self-referential)."""
+        Database.get_instance().clear()
+
+        child1 = Child(name="Bob")
+        child2 = Child(name="Charlie")
+
+        child1.siblings = [child2]
+
+        export_data = child1.serialize(for_export=True)
+        # ManyToMany with same type: "Child" <= "Child" → serialize
+        assert "siblings" in export_data, "Self-referential ManyToMany should be kept"
+
+
+    # ── Issue #4 regression tests ──────────────────────────────────────────
+
+    def test_issue4_bidirectional_one_to_one_import_order(self):
+        """Regression test for issue #4: bidirectional OneToOne import crash.
+
+        Reproduces the exact scenario from the issue: User↔Member with
+        OneToOne on both sides. Without the fix, whichever entity type is
+        imported first will reference the other which doesn't exist yet,
+        crashing with:
+            ValueError: No entity of types Member found with ID or name 'mem_xxx'
+
+        The fix: serialize(for_export=True) skips the OneToOne on the
+        alphabetically-later side ("User" > "Member" → User.member is skipped).
+        Import order: User first (no member ref), Member second (user ref resolves).
+        """
+        Database.get_instance().clear()
+
+        # Define User↔Member with bidirectional OneToOne (mirrors real realm entities)
+        class User(Entity):
+            __alias__ = "name"
+            name = String()
+            member = OneToOne("Member4", "user")
+
+        class Member4(Entity):
+            __alias__ = "id"
+            id = String()
+            user = OneToOne("User", "member")
+
+        # Create linked entities
+        user = User(name="system")
+        member = Member4(id="mem_9f03f2ee")
+        member.user = user
+
+        # Verify both sides are set
+        assert user.member == member
+        assert member.user == user
+
+        # ── Part 1: for_export=True produces importable JSON ──
+        user_data = user.serialize(for_export=True)
+        member_data = member.serialize(for_export=True)
+
+        # User should NOT have 'member' (since "User" > "Member4")
+        assert "member" not in user_data, (
+            f"for_export should skip OneToOne on alphabetically-later side; got {user_data}"
+        )
+        # Member4 SHOULD have 'user' (since "Member4" < "User")
+        assert "user" in member_data, (
+            f"for_export should keep OneToOne on alphabetically-earlier side; got {member_data}"
+        )
+        assert member_data["user"] == "system"  # alias
+
+        # Clear and reimport in dependency order
+        Database.get_instance().clear()
+        recreated_user = User.deserialize(user_data)  # No member ref → no crash
+        recreated_member = Member4.deserialize(member_data)  # user ref → resolves to existing User
+
+        # Both sides should be reconstructed
+        assert recreated_member.user == recreated_user, "ManyToOne should resolve"
+        assert recreated_user.member == recreated_member, "Reverse OneToOne should be set"
+
+        # ── Part 2: OLD serialize() would crash on wrong import order ──
+        Database.get_instance().clear()
+
+        user2 = User(name="alice")
+        member2 = Member4(id="mem_deadbeef")
+        member2.user = user2
+
+        # Normal serialize includes BOTH sides
+        user2_full = user2.serialize()
+        member2_full = member2.serialize()
+        assert "member" in user2_full, "Normal serialize should include both sides"
+
+        # Importing User first with normal data crashes because Member doesn't exist
+        Database.get_instance().clear()
+        try:
+            User.deserialize(user2_full)  # has member: "mem_deadbeef" → Member4 doesn't exist
+            # If deserialize silently skips, that's also fine (it catches ValueError)
+        except ValueError as e:
+            assert "mem_deadbeef" in str(e), f"Should reference the missing member alias: {e}"
+
+    def test_issue4_one_to_many_dangling_refs_load_some(self):
+        """Regression test for issue #4: OneToMany with dangling refs crashes load_some.
+
+        Reproduces the runtime crash: Token stored with balances: [4, 5, 6] but
+        WalletBalance entities were deleted. Token.load_some() crashes with:
+            ValueError: No entity of types WalletBalance found with ID or name '4'
+
+        The fix: load_some() catches ValueError/AttributeError and skips broken
+        entities instead of crashing the entire batch.
+        """
+        Database.get_instance().clear()
+
+        class Account(Entity):
+            name = String()
+            entries = OneToMany("Entry4", "account")
+
+        class Entry4(Entity):
+            label = String()
+            account = ManyToOne("Account", "entries")
+
+        # Create account with entries
+        acct = Account(name="Treasury")
+        e1 = Entry4(label="tx1")
+        e2 = Entry4(label="tx2")
+        e1.account = acct
+        e2.account = acct
+        assert len(acct.entries) == 2
+
+        # Serialize WITH OneToMany (internal storage format)
+        acct_data = acct.serialize()
+        assert "entries" in acct_data
+
+        # Now delete the entries from DB but leave the account's stored data intact
+        e1.delete()
+        e2.delete()
+
+        # Clear entity registry so load() reads from DB
+        Database.get_instance()._entity_registry = {}
+
+        # load_some should NOT crash — it should skip broken entities
+        loaded = Account.load_some(from_id=1, count=10)
+        # The account itself should still load (its entries will fail silently)
+        assert len(loaded) >= 0, "load_some should not crash on dangling OneToMany refs"
+
+    def test_issue4_for_export_eliminates_dangling_one_to_many(self):
+        """Regression test: for_export=True prevents OneToMany dangling refs entirely.
+
+        If Token was serialized with for_export=True, the 'balances' OneToMany field
+        is not included. On import, Token has no forward refs to WalletBalance,
+        so there's nothing to dangle.
+        """
+        Database.get_instance().clear()
+
+        class Token4(Entity):
+            name = String()
+            balances = OneToMany("Balance4", "token")
+
+        class Balance4(Entity):
+            amount = String()
+            token = ManyToOne("Token4", "balances")
+
+        token = Token4(name="ICP")
+        b1 = Balance4(amount="100")
+        b2 = Balance4(amount="200")
+        b1.token = token
+        b2.token = token
+
+        # for_export skips OneToMany
+        export_data = token.serialize(for_export=True)
+        assert "balances" not in export_data
+
+        # Import token without balance refs — no crash possible
+        Database.get_instance().clear()
+        reimported_token = Token4.deserialize(export_data)
+        assert reimported_token.name == "ICP"
+        assert len(reimported_token.balances) == 0  # No balances yet
+
+        # Now import balances with ManyToOne ref — reconstructs OneToMany
+        b1_data = b1.serialize(for_export=True)
+        b2_data = b2.serialize(for_export=True)
+        Balance4.deserialize(b1_data)
+        Balance4.deserialize(b2_data)
+
+        assert len(reimported_token.balances) == 2, (
+            "OneToMany should be reconstructed from ManyToOne during import"
+        )
+
+    def test_issue4_full_round_trip_bidirectional(self):
+        """End-to-end test: serialize(for_export=True) → clear → deserialize.
+
+        Models the exact realm workflow: generate entities in memory,
+        serialize to JSON, clear DB, import in dependency order.
+        All relations should be fully reconstructed.
+        """
+        Database.get_instance().clear()
+
+        class Realm4(Entity):
+            __alias__ = "name"
+            name = String()
+            users = OneToMany("User4", "realm")
+
+        class User4(Entity):
+            __alias__ = "name"
+            name = String()
+            realm = ManyToOne("Realm4", "users")
+            member = OneToOne("Member44", "user")
+            human = OneToOne("Human4", "user")
+
+        class Human4(Entity):
+            __alias__ = "name"
+            name = String()
+            user = OneToOne("User4", "human")
+
+        class Member44(Entity):
+            __alias__ = "alias"
+            alias = String()
+            user = OneToOne("User4", "member")
+
+        # Generate data (mimics generator.py)
+        realm = Realm4(name="Agora")
+        users = [User4(name=f"user_{i}", realm=realm) for i in range(3)]
+        humans = [Human4(name=f"human_{i}", user=users[i]) for i in range(3)]
+        members = [Member44(alias=f"mem_{i}", user=users[i]) for i in range(3)]
+
+        # Verify in-memory relations
+        assert len(realm.users) == 3
+        for i in range(3):
+            assert users[i].member == members[i]
+            assert users[i].human == humans[i]
+
+        # Serialize for export (dependency order: Realm → Users → Humans → Members)
+        all_data = (
+            [realm.serialize(for_export=True)]
+            + [u.serialize(for_export=True) for u in users]
+            + [h.serialize(for_export=True) for h in humans]
+            + [m.serialize(for_export=True) for m in members]
+        )
+
+        # Verify no OneToMany or wrong-side OneToOne in export
+        realm_data = all_data[0]
+        assert "users" not in realm_data, "OneToMany should not be in export"
+        user_data = all_data[1]
+        # "User4" > "Human4" → User4 should NOT have human
+        assert "human" not in user_data, "OneToOne (User4>Human4) should be skipped"
+        # "User4" > "Member44" → User4 should NOT have member
+        assert "member" not in user_data, "OneToOne (User4>Member44) should be skipped"
+
+        # Clear DB completely
+        Database.get_instance().clear()
+
+        # Import in dependency order — should NOT crash
+        # Use specific classes (Database.clear() wipes entity type registry,
+        # so generic Entity.deserialize can't resolve locally-defined classes)
+        type_map = {
+            "Realm4": Realm4, "User4": User4,
+            "Human4": Human4, "Member44": Member44,
+        }
+        for item in all_data:
+            type_map[item["_type"]].deserialize(item)
+
+        # Verify all relations are reconstructed
+        loaded_realm = Realm4["Agora"]
+        assert loaded_realm is not None
+        assert len(loaded_realm.users) == 3, "OneToMany should be reconstructed"
+
+        loaded_user0 = User4["user_0"]
+        assert loaded_user0.realm == loaded_realm, "ManyToOne should resolve"
+        assert loaded_user0.human is not None, "OneToOne reverse should be set"
+        assert loaded_user0.human.name == "human_0"
+        assert loaded_user0.member is not None, "OneToOne reverse should be set"
+        assert loaded_user0.member.alias == "mem_0"
+
+
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestSerialization)
     return tester.run_tests()

@@ -24,9 +24,9 @@ class TestAutoRegister:
             __alias__ = "name"
             name = String(max_length=50)
 
-        assert "Dog" in db._entity_types, (
-            f"Dog not in _entity_types: {list(db._entity_types.keys())}"
-        )
+        assert (
+            "Dog" in db._entity_types
+        ), f"Dog not in _entity_types: {list(db._entity_types.keys())}"
         assert db._entity_types["Dog"] is Dog
 
     def test_multiple_types_registered(self):
@@ -79,9 +79,9 @@ class TestAutoRegister:
 
         full_name = MyExtEntity.get_full_type_name()
         assert full_name == "ext_test::MyExtEntity"
-        assert full_name in db._entity_types, (
-            f"{full_name} not in _entity_types: {list(db._entity_types.keys())}"
-        )
+        assert (
+            full_name in db._entity_types
+        ), f"{full_name} not in _entity_types: {list(db._entity_types.keys())}"
 
     def test_clear_preserves_type_registration(self):
         """Database.clear() should not lose entity type registrations."""

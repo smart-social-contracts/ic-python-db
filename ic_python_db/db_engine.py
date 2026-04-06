@@ -39,6 +39,7 @@ class Database:
 
         # Flush any Entity subclasses that were defined before Database existed
         from .entity import Entity
+
         Entity._flush_deferred_types()
 
         return cls._instance

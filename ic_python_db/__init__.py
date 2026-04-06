@@ -19,7 +19,7 @@ from .properties import (
 from .storage import MemoryStorage, Storage
 from .system_time import SystemTime
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 __all__ = [
     "Database",
     "Entity",

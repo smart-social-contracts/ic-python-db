@@ -36,6 +36,11 @@ class Database:
         if cls._instance:
             raise RuntimeError("Database instance already exists")
         cls._instance = cls(audit_enabled, db_storage, db_audit)
+
+        # Flush any Entity subclasses that were defined before Database existed
+        from .entity import Entity
+        Entity._flush_deferred_types()
+
         return cls._instance
 
     def __init__(

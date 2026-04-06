@@ -91,9 +91,36 @@ class Entity:
 
     _entity_type = None  # To be defined in subclasses
     _context: Set["Entity"] = set()  # Set of entities in current context
+    _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
+
+    def __init_subclass__(cls, **kwargs):
+        """Auto-register Entity subclasses with the Database at class definition time."""
+        super().__init_subclass__(**kwargs)
+        db = Database._instance
+        if db is not None:
+            db.register_entity_type(cls, cls.get_full_type_name())
+        else:
+            # Database not initialized yet — defer registration
+            Entity._deferred_types.append(cls)
+
+    @classmethod
+    def _flush_deferred_types(cls):
+        """Register any Entity subclasses that were defined before Database existed."""
+        if not cls._deferred_types:
+            return
+        try:
+            db = Database.get_instance()
+        except Exception:
+            return
+        for deferred_cls in cls._deferred_types:
+            try:
+                db.register_entity_type(deferred_cls, deferred_cls.get_full_type_name())
+            except Exception:
+                pass
+        cls._deferred_types.clear()
 
     def __init__(self, **kwargs):
         """Initialize a new entity.

@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ic_python_db"
+name = "ic-python-db"
 version = "0.7.7"
 description = "A lightweight key-value database written in Python, intended for use on the Internet Computer (IC)"
 readme = "README.md"

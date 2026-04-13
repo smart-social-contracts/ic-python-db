@@ -5,6 +5,19 @@ set -x
 
 echo "Installing dependencies..."
 pip install -r requirements.txt
+pip install --upgrade ic-basilisk
+
+# Download CPython canister template if not present
+BASILISK_VERSION=$(python -c "import basilisk; print(basilisk.__version__)")
+TEMPLATE_DIR="$HOME/.config/basilisk/${BASILISK_VERSION}"
+TEMPLATE_PATH="${TEMPLATE_DIR}/cpython_canister_template.wasm"
+if [ ! -f "$TEMPLATE_PATH" ]; then
+    echo "Downloading CPython canister template..."
+    mkdir -p "$TEMPLATE_DIR"
+    curl -fL https://github.com/smart-social-contracts/basilisk/releases/download/cpython-wasm-3.13.0/cpython_canister_template.wasm \
+         -o "$TEMPLATE_PATH"
+    echo "Template downloaded: $(du -sh "$TEMPLATE_PATH" | cut -f1)"
+fi
 
 # Define a list of test identifiers
 TEST_IDS=('example_1' 'example_2' 'entity' 'mixins' 'properties' 'alias_and_properties' 'relationships' 'enhanced_relations' 'serialization' 'database' 'audit' 'namespaces')

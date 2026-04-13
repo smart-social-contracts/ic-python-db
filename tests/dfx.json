@@ -1,14 +1,10 @@
 {
   "canisters": {
     "test": {
-      "type": "basilisk",
-      "main": "src/main.py"
-    }
-  },
-  "defaults": {
-    "build": {
-      "args": "",
-      "packtool": ""
+      "type": "custom",
+      "build": "CANISTER_CANDID_PATH=./test.did python -m basilisk test src/main.py",
+      "candid": "test.did",
+      "wasm": ".basilisk/test/test.wasm"
     }
   },
   "output_env_file": ".env",

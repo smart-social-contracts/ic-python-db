@@ -12,6 +12,7 @@ A lightweight key-value database with entity relationships and audit logging cap
 
 - **Persistent Storage**: Works with StableBTreeMap stable structure for persistent storage on your canister's stable memory so your data persists automatically across canister upgrades.
 - **Entity-Relational Database**: Create, read and write entities with OneToOne, OneToMany, ManyToOne, and ManyToMany relationships.
+- **Schema Versioning & Upgrade Safety**: Automatic schema introspection, compatibility checking, and auto-migration for safe changes. Breaking changes without a `migrate()` method are rejected, preventing data corruption on canister upgrades.
 - **Entity Hooks**: Intercept and control entity lifecycle events (create, modify, delete) with `on_event` hooks.
 - **Access Control**: Thread-safe context management for user identity tracking and ownership-based permissions.
 - **Namespaces**: Organize entities into namespaces to avoid type conflicts when you have multiple entities with the same class name.
@@ -267,6 +268,90 @@ class User(Entity):
     profile: Optional["Profile"] = OneToOne("Profile", "user")
 ```
 
+## Schema Versioning & Upgrade Safety
+
+ic-python-db includes built-in upgrade compatibility checking. The system introspects your Entity class definitions to detect schema changes and ensure safe upgrades.
+
+### Auto-migration for safe changes
+
+Adding a field with a default value requires no migration code — the system handles it automatically:
+
+```python
+# v1
+class Product(Entity):
+    __version__ = 1
+    name = String()
+
+# v2 — just add the field with a default, no migrate() needed
+class Product(Entity):
+    __version__ = 2
+    name = String()
+    price = Float(default=0.0)    # auto-injected for existing entities
+    active = Boolean(default=True) # auto-injected for existing entities
+```
+
+### Custom migration for breaking changes
+
+For type changes, field renames, or data transformations, override `migrate()`:
+
+```python
+class Product(Entity):
+    __version__ = 2
+    name = String()
+    price_dollars = Float()  # was price_cents: Integer in v1
+
+    @classmethod
+    def migrate(cls, obj, from_version, to_version):
+        if from_version == 1:
+            obj["price_dollars"] = obj.pop("price_cents") / 100.0
+        return obj
+```
+
+### Upgrade compatibility enforcement
+
+Call `check_upgrade_compatibility()` from your canister's `post_upgrade` to reject incompatible upgrades before they corrupt data:
+
+```python
+from basilisk import post_upgrade
+from ic_python_db import Database
+
+@post_upgrade
+def on_post_upgrade():
+    db = Database.get_instance()
+    db.check_upgrade_compatibility()
+    # If a breaking change lacks migrate(), this raises SchemaIncompatibleError
+    # which traps post_upgrade, causing the IC to roll back the upgrade
+```
+
+The system classifies schema changes as:
+
+| Change | Safety | Action |
+|--------|--------|--------|
+| Add field with `default=` | Safe | Auto-migrated |
+| Remove field | Safe | Old data ignored |
+| Add new Entity type | Safe | No migration needed |
+| Change field type | Breaking | Requires `migrate()` |
+| Add field without default | Breaking | Requires `migrate()` |
+| Change relationship type | Breaking | Requires `migrate()` |
+
+### Schema introspection
+
+You can inspect and compare schemas programmatically:
+
+```python
+from ic_python_db import Database, build_schema, diff_schemas
+
+db = Database.get_instance()
+
+# Build current schema from Entity definitions
+schema = db.build_schema_from_entities()
+
+# Compare two schemas
+changes = diff_schemas(old_schema, new_schema)
+for change in changes:
+    print(f"{change.entity_type}.{change.field}: {change.reason}")
+```
+
 ## API Reference
 
 - **Core**: `Database`, `Entity`
@@ -275,6 +360,7 @@ class User(Entity):
 - **Mixins**: `TimestampedMixin` (timestamps and ownership tracking)
 - **Hooks**: `ACTION_CREATE`, `ACTION_MODIFY`, `ACTION_DELETE`
 - **Context**: `get_caller_id()`, `set_caller_id()`, `Database.as_user()`
+- **Schema**: `build_schema`, `diff_schemas`, `schema_hash`, `SchemaIncompatibleError`
 
 ## Development
 

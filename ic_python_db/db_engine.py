@@ -322,6 +322,50 @@ class Database:
             return json.dumps(result, indent=2)
         return json.dumps(result)
 
+    def build_schema_from_entities(self) -> Dict[str, Any]:
+        """Build a schema descriptor from all registered entity types.
+
+        Returns:
+            Dict describing every entity type's fields, types, defaults,
+            constraints, and relationships.
+        """
+        from .schema import build_schema
+
+        return build_schema(self._entity_types)
+
+    def get_schema_hash(self) -> Optional[str]:
+        """Return the stored schema hash, or None if no schema has been saved."""
+        return self.load("_system", "_schema_hash")
+
+    def save_schema(self) -> None:
+        """Persist the current schema descriptor and its hash."""
+        from .schema import schema_hash
+
+        current = self.build_schema_from_entities()
+        self.save("_system", "_schema", current)
+        self.save("_system", "_schema_hash", schema_hash(current))
+
+    def check_upgrade_compatibility(self, raise_on_error: bool = True):
+        """Check that current Entity definitions are compatible with stored schema.
+
+        Compares the previously stored schema against the live class definitions.
+        Breaking changes (type changes, new fields without defaults, relationship
+        cardinality changes) require the Entity to define a migrate() override.
+
+        On success, saves the new schema. On failure (with raise_on_error=True),
+        raises SchemaIncompatibleError — designed to be called from post_upgrade
+        so the IC rolls back the upgrade.
+
+        Returns:
+            List of SchemaChange objects.
+
+        Raises:
+            SchemaIncompatibleError: if incompatible and raise_on_error is True.
+        """
+        from .schema import check_upgrade_compatibility
+
+        return check_upgrade_compatibility(self, raise_on_error=raise_on_error)
+
     def get_audit(
         self, id_from: Optional[int] = None, id_to: Optional[int] = None
     ) -> Dict[str, str]:

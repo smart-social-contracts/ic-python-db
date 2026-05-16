@@ -16,6 +16,7 @@ from .properties import (
     OneToOne,
     String,
 )
+from .schema import SchemaIncompatibleError, build_schema, diff_schemas, schema_hash
 from .storage import MemoryStorage, Storage
 from .system_time import SystemTime
 
@@ -38,4 +39,8 @@ __all__ = [
     "ACTION_CREATE",
     "ACTION_MODIFY",
     "ACTION_DELETE",
+    "SchemaIncompatibleError",
+    "build_schema",
+    "diff_schemas",
+    "schema_hash",
 ]

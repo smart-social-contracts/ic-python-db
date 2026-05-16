@@ -335,6 +335,25 @@ class Entity:
         return f"{cls.get_full_type_name()}_{field_name}_alias"
 
     @classmethod
+    def _auto_migrate_defaults(cls, data: dict) -> dict:
+        """Inject default values for new Property fields not present in stored data.
+
+        Called before migrate() during version-mismatch loads so that developers
+        don't need to write migrate() for the trivial case of adding a field
+        with a default value.
+        """
+        from .properties import Property
+
+        for klass in reversed(cls.__mro__):
+            for attr_name, attr_value in klass.__dict__.items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr_value, Property) and attr_name not in data:
+                    if attr_value.default is not None:
+                        data[attr_name] = attr_value.default
+        return data
+
+    @classmethod
     def migrate(cls, obj: dict, from_version: int, to_version: int) -> dict:
         """Migrate entity data from one version to another.
 
@@ -404,8 +423,10 @@ class Entity:
                 f"Version mismatch for {type_name}@{entity_id}: "
                 f"stored={stored_version}, current={current_version}"
             )
-            # Apply migration
+            # Apply custom migration first (developer logic takes priority)
             data = cls.migrate(data, stored_version, current_version)
+            # Auto-inject defaults for new fields not handled by migrate()
+            data = cls._auto_migrate_defaults(data)
             data["__version__"] = current_version
             logger.debug(
                 f"Migrated {type_name}@{entity_id} to version {current_version}"

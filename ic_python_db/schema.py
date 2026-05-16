@@ -10,7 +10,10 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
+
+if TYPE_CHECKING:
+    from .db_engine import Database
 
 
 class ChangeType(Enum):
@@ -245,7 +248,12 @@ def diff_schemas(
                 )
             )
 
-        _diff_fields(entity_type, old_entity.get("fields", {}), new_entity.get("fields", {}), changes)
+        _diff_fields(
+            entity_type,
+            old_entity.get("fields", {}),
+            new_entity.get("fields", {}),
+            changes,
+        )
         _diff_relationships(
             entity_type,
             old_entity.get("relationships", {}),
@@ -447,7 +455,8 @@ def check_upgrade_compatibility(
 
     if breaking_without_migrate and raise_on_error:
         details = "\n".join(
-            f"  - {c.entity_type}.{c.field}: {c.reason}" for c in breaking_without_migrate
+            f"  - {c.entity_type}.{c.field}: {c.reason}"
+            for c in breaking_without_migrate
         )
         raise SchemaIncompatibleError(
             f"Upgrade rejected: {len(breaking_without_migrate)} breaking change(s) "

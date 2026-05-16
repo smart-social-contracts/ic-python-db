@@ -156,8 +156,20 @@ class TestSchema:
 
     def test_schema_hash_changes_with_schema(self):
         """Test that different schemas produce different hashes."""
-        schema_a = {"Product": {"version": 1, "fields": {"name": {"type": "String"}}, "relationships": {}}}
-        schema_b = {"Product": {"version": 2, "fields": {"name": {"type": "String"}}, "relationships": {}}}
+        schema_a = {
+            "Product": {
+                "version": 1,
+                "fields": {"name": {"type": "String"}},
+                "relationships": {},
+            }
+        }
+        schema_b = {
+            "Product": {
+                "version": 2,
+                "fields": {"name": {"type": "String"}},
+                "relationships": {},
+            }
+        }
 
         assert schema_hash(schema_a) != schema_hash(schema_b)
 
@@ -165,7 +177,13 @@ class TestSchema:
 
     def test_diff_no_changes(self):
         """Test that identical schemas produce no changes."""
-        schema = {"Product": {"version": 1, "fields": {"name": {"type": "String", "kind": "property"}}, "relationships": {}}}
+        schema = {
+            "Product": {
+                "version": 1,
+                "fields": {"name": {"type": "String", "kind": "property"}},
+                "relationships": {},
+            }
+        }
         changes = diff_schemas(schema, schema)
         assert len(changes) == 0
 
@@ -191,11 +209,23 @@ class TestSchema:
 
     def test_diff_added_field_with_default(self):
         """Test that adding a field with a default is safe."""
-        old = {"Product": {"version": 1, "fields": {"name": {"type": "String", "kind": "property"}}, "relationships": {}}}
-        new = {"Product": {"version": 2, "fields": {
-            "name": {"type": "String", "kind": "property"},
-            "price": {"type": "Float", "kind": "property", "default": 0.0},
-        }, "relationships": {}}}
+        old = {
+            "Product": {
+                "version": 1,
+                "fields": {"name": {"type": "String", "kind": "property"}},
+                "relationships": {},
+            }
+        }
+        new = {
+            "Product": {
+                "version": 2,
+                "fields": {
+                    "name": {"type": "String", "kind": "property"},
+                    "price": {"type": "Float", "kind": "property", "default": 0.0},
+                },
+                "relationships": {},
+            }
+        }
 
         changes = diff_schemas(old, new)
         field_changes = [c for c in changes if c.field == "price"]
@@ -205,11 +235,23 @@ class TestSchema:
 
     def test_diff_added_field_without_default(self):
         """Test that adding a field without a default is breaking."""
-        old = {"Product": {"version": 1, "fields": {"name": {"type": "String", "kind": "property"}}, "relationships": {}}}
-        new = {"Product": {"version": 2, "fields": {
-            "name": {"type": "String", "kind": "property"},
-            "price": {"type": "Float", "kind": "property"},
-        }, "relationships": {}}}
+        old = {
+            "Product": {
+                "version": 1,
+                "fields": {"name": {"type": "String", "kind": "property"}},
+                "relationships": {},
+            }
+        }
+        new = {
+            "Product": {
+                "version": 2,
+                "fields": {
+                    "name": {"type": "String", "kind": "property"},
+                    "price": {"type": "Float", "kind": "property"},
+                },
+                "relationships": {},
+            }
+        }
 
         changes = diff_schemas(old, new)
         field_changes = [c for c in changes if c.field == "price"]
@@ -219,13 +261,25 @@ class TestSchema:
 
     def test_diff_removed_field(self):
         """Test that removing a field is safe."""
-        old = {"Product": {"version": 1, "fields": {
-            "name": {"type": "String", "kind": "property"},
-            "old_field": {"type": "String", "kind": "property"},
-        }, "relationships": {}}}
-        new = {"Product": {"version": 2, "fields": {
-            "name": {"type": "String", "kind": "property"},
-        }, "relationships": {}}}
+        old = {
+            "Product": {
+                "version": 1,
+                "fields": {
+                    "name": {"type": "String", "kind": "property"},
+                    "old_field": {"type": "String", "kind": "property"},
+                },
+                "relationships": {},
+            }
+        }
+        new = {
+            "Product": {
+                "version": 2,
+                "fields": {
+                    "name": {"type": "String", "kind": "property"},
+                },
+                "relationships": {},
+            }
+        }
 
         changes = diff_schemas(old, new)
         field_changes = [c for c in changes if c.field == "old_field"]
@@ -235,8 +289,20 @@ class TestSchema:
 
     def test_diff_type_changed(self):
         """Test that changing a field type is breaking."""
-        old = {"Product": {"version": 1, "fields": {"age": {"type": "String", "kind": "property"}}, "relationships": {}}}
-        new = {"Product": {"version": 2, "fields": {"age": {"type": "Integer", "kind": "property"}}, "relationships": {}}}
+        old = {
+            "Product": {
+                "version": 1,
+                "fields": {"age": {"type": "String", "kind": "property"}},
+                "relationships": {},
+            }
+        }
+        new = {
+            "Product": {
+                "version": 2,
+                "fields": {"age": {"type": "Integer", "kind": "property"}},
+                "relationships": {},
+            }
+        }
 
         changes = diff_schemas(old, new)
         type_changes = [c for c in changes if c.change_type == ChangeType.TYPE_CHANGED]
@@ -247,29 +313,73 @@ class TestSchema:
 
     def test_diff_constraints_changed(self):
         """Test that changing constraints is safe."""
-        old = {"Product": {"version": 1, "fields": {
-            "name": {"type": "String", "kind": "property", "constraints": {"max_length": 50}},
-        }, "relationships": {}}}
-        new = {"Product": {"version": 2, "fields": {
-            "name": {"type": "String", "kind": "property", "constraints": {"max_length": 100}},
-        }, "relationships": {}}}
+        old = {
+            "Product": {
+                "version": 1,
+                "fields": {
+                    "name": {
+                        "type": "String",
+                        "kind": "property",
+                        "constraints": {"max_length": 50},
+                    },
+                },
+                "relationships": {},
+            }
+        }
+        new = {
+            "Product": {
+                "version": 2,
+                "fields": {
+                    "name": {
+                        "type": "String",
+                        "kind": "property",
+                        "constraints": {"max_length": 100},
+                    },
+                },
+                "relationships": {},
+            }
+        }
 
         changes = diff_schemas(old, new)
-        constraint_changes = [c for c in changes if c.change_type == ChangeType.CONSTRAINTS_CHANGED]
+        constraint_changes = [
+            c for c in changes if c.change_type == ChangeType.CONSTRAINTS_CHANGED
+        ]
         assert len(constraint_changes) == 1
         assert constraint_changes[0].safe is True
 
     def test_diff_relationship_type_changed(self):
         """Test that changing relationship type is breaking."""
-        old = {"User": {"version": 1, "fields": {}, "relationships": {
-            "profile": {"type": "OneToOne", "target": "Profile", "kind": "relationship"},
-        }}}
-        new = {"User": {"version": 2, "fields": {}, "relationships": {
-            "profile": {"type": "ManyToMany", "target": "Profile", "kind": "relationship"},
-        }}}
+        old = {
+            "User": {
+                "version": 1,
+                "fields": {},
+                "relationships": {
+                    "profile": {
+                        "type": "OneToOne",
+                        "target": "Profile",
+                        "kind": "relationship",
+                    },
+                },
+            }
+        }
+        new = {
+            "User": {
+                "version": 2,
+                "fields": {},
+                "relationships": {
+                    "profile": {
+                        "type": "ManyToMany",
+                        "target": "Profile",
+                        "kind": "relationship",
+                    },
+                },
+            }
+        }
 
         changes = diff_schemas(old, new)
-        rel_changes = [c for c in changes if c.change_type == ChangeType.RELATIONSHIP_CHANGED]
+        rel_changes = [
+            c for c in changes if c.change_type == ChangeType.RELATIONSHIP_CHANGED
+        ]
         assert len(rel_changes) == 1
         assert rel_changes[0].safe is False
 
@@ -279,7 +389,9 @@ class TestSchema:
         new = {"Product": {"version": 3, "fields": {}, "relationships": {}}}
 
         changes = diff_schemas(old, new)
-        version_changes = [c for c in changes if c.change_type == ChangeType.VERSION_CHANGED]
+        version_changes = [
+            c for c in changes if c.change_type == ChangeType.VERSION_CHANGED
+        ]
         assert len(version_changes) == 1
         assert version_changes[0].old_value == 1
         assert version_changes[0].new_value == 3

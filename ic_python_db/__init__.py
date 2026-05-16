@@ -20,7 +20,7 @@ from .schema import SchemaIncompatibleError, build_schema, diff_schemas, schema_
 from .storage import MemoryStorage, Storage
 from .system_time import SystemTime
 
-__version__ = "0.7.9"
+__version__ = "0.8.0"
 __all__ = [
     "Database",
     "Entity",

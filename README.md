@@ -352,6 +352,8 @@ for change in changes:
     print(f"{change.entity_type}.{change.field}: {change.reason}")
 ```
 
+See [docs/SCHEMA_VERSIONING.md](docs/SCHEMA_VERSIONING.md) for the full reference.
+
 ## API Reference
 
 - **Core**: `Database`, `Entity`

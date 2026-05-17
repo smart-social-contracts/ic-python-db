@@ -25,6 +25,9 @@ dfx start --clean --background
 echo "Deploying test canister..."
 dfx deploy
 
+echo "Topping up canister cycles for stress test..."
+dfx ledger fabricate-cycles --canister test --t 100
+
 if python -u entrypoint_stress.py; then
     echo "✅ IC stress tests completed successfully!"
 else

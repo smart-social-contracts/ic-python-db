@@ -24,6 +24,9 @@ dfx start --clean --background
 echo "Deploying test canister..."
 dfx deploy
 
+echo "Topping up canister cycles..."
+dfx ledger fabricate-cycles --canister test --t 100
+
 echo "Running benchmarks..."
 python -u entrypoint_benchmark.py
 

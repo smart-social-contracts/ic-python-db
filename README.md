@@ -208,7 +208,7 @@ See [docs/HOOKS.md](docs/HOOKS.md) for more patterns.
 
 ## Access Control
 
-Thread-safe user context management with `as_user()`:
+User context management with `as_user()`:
 
 ```python
 from ic_python_db import Database, Entity, String, ACTION_MODIFY, ACTION_DELETE

@@ -4,11 +4,13 @@ This guide shows how to implement access control using the `on_event` hooks comb
 
 ## Overview
 
-The `ic-python-db` provides thread-safe context management for tracking the current user:
+`ic-python-db` provides context management for tracking the current user:
 
 - **`db.as_user(user_id)`** - Context manager for running operations as a specific user
 - **`get_caller_id()`** - Get the current user ID
 - **`set_caller_id(user_id)`** - Set the current user ID
+
+> **Note:** The context system uses a simple module-level variable, which is safe for IC canisters since they are single-threaded. It is **not** thread-safe for multi-threaded environments outside the IC.
 
 ## Basic Usage
 
@@ -70,24 +72,6 @@ with db.as_user("admin"):
 ```
 
 ## Benefits
-
-### Thread-Safe
-Uses Python's `contextvars` for proper thread/async isolation:
-
-```python
-# Different threads won't interfere with each other
-import threading
-
-def create_doc(user_id):
-    with db.as_user(user_id):
-        doc = Document(title=f"Doc for {user_id}")
-        print(f"Created by: {doc._owner}")
-
-t1 = threading.Thread(target=create_doc, args=("alice",))
-t2 = threading.Thread(target=create_doc, args=("bob",))
-t1.start()
-t2.start()
-```
 
 ### Automatic Cleanup
 Context manager ensures caller ID is reset even if exceptions occur:

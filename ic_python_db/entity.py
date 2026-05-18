@@ -465,14 +465,17 @@ class Entity:
         Returns:
             List of entities
         """
-        import warnings
+        try:
+            import warnings
 
-        warnings.warn(
-            "Entity.instances() is deprecated and will be removed. "
-            "Use load_some() with pagination instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+            warnings.warn(
+                "Entity.instances() is deprecated and will be removed. "
+                "Use load_some() with pagination instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        except (ImportError, AttributeError):
+            pass
         db = Database.get_instance()
         full_type_name = cls.get_full_type_name()
         db.register_entity_type(cls, full_type_name)

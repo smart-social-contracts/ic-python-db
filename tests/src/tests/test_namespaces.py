@@ -172,9 +172,11 @@ class TestNamespaces:
         assert post1.author == user
         assert post1 in user.posts
 
-        # Test OneToMany assignment
-        user.posts = [post1, post2]
-        assert list(user.posts) == [post1, post2]
+        # Test setting via ManyToOne side
+        post2.author = user
+        assert post1 in user.posts
+        assert post2 in user.posts
+        assert len(user.posts) == 2
         assert post1.author == user
         assert post2.author == user
 

@@ -117,7 +117,7 @@ class TestEnhancedRelations:
         assert len(dept.employees) == 3, "dept.employees should now have 3 members"
 
     def test_one_to_many_entity_resolution(self):
-        """Test OneToMany relations with mixed entity, ID, and name resolution."""
+        """Test OneToMany relations using ManyToOne side with entity resolution."""
         user1 = User(username="alice", email="alice@example.com")
         user2 = User(username="bob", email="bob@example.com")
         user3 = User(username="charlie", email="charlie@example.com")
@@ -131,8 +131,11 @@ class TestEnhancedRelations:
         assert user3.department is None, "user3.department should initially be None"
         assert user4.department is None, "user4.department should initially be None"
 
-        # Set using mix of entity instances and string IDs/names
-        dept.employees = [user3, user4._id, "alice"]  # Mix of entity, ID, and name
+        # Set using ManyToOne side with various resolution methods
+        user3.department = dept  # entity instance
+        user4.department = dept._id  # string ID
+        user1.department = "Engineering"  # name/alias
+
         expected_usernames = {"charlie", "diana", "alice"}
         actual_usernames = {emp.username for emp in dept.employees}
         assert (
@@ -199,8 +202,8 @@ class TestEnhancedRelations:
             len(user1.projects) == 1
         ), "user1.projects should still have exactly 1 project"
 
-    def test_relation_list_add_with_entity_resolution(self):
-        """Test RelationList.add with entity, ID, and name resolution."""
+    def test_incremental_many_to_many_assignment(self):
+        """Test ManyToMany incremental addition with entity resolution."""
         user1 = User(username="alice", email="alice@example.com")
         user2 = User(username="bob", email="bob@example.com")
         project1 = Project(name="WebApp", description="Main web application")
@@ -208,8 +211,8 @@ class TestEnhancedRelations:
         # Verify initial state
         assert len(project1.members) == 0, "project1.members should initially be empty"
 
-        # Add using string ID
-        project1.members.add(user1._id)
+        # Set using string ID
+        project1.members = [user1._id]
         assert (
             user1 in project1.members
         ), f"user1 should be in project1.members after adding by ID '{user1._id}'"
@@ -218,8 +221,8 @@ class TestEnhancedRelations:
         ), "project1 should be in user1.projects (reverse relation)"
         assert len(project1.members) == 1, "project1.members should have 1 member"
 
-        # Add using alias/name
-        project1.members.add("bob")
+        # Add another using alias/name (must re-set full list)
+        project1.members = [user1, "bob"]
         assert (
             user2 in project1.members
         ), "user2 should be in project1.members after adding by alias 'bob'"
@@ -242,9 +245,9 @@ class TestEnhancedRelations:
             user1.projects = "nonexistent_id"
             assert False, "Should have raised ValueError for nonexistent ID"
         except ValueError as e:
-            assert "No entity of types" in str(
+            assert "No entity of type" in str(
                 e
-            ), f"Expected 'No entity of types' in error message, got: {str(e)}"
+            ), f"Expected 'No entity of type' in error message, got: {str(e)}"
 
         # Test invalid type
         try:

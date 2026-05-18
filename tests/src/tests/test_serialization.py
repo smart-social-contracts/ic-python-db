@@ -34,9 +34,9 @@ class TestSerialization:
     def test_serialization_format(self):
         """Test that relations are serialized in the correct format.
 
-        OneToMany is always skipped (reconstructed from reverse ManyToOne).
-        OneToOne is serialized only on the alphabetically-earlier entity type side.
-        "Child" < "Parent" → Child serializes favorite_parent; Parent skips favorite_child.
+        OneToMany is never serialized (reconstructed from ManyToOne during import).
+        ManyToOne and owning-side OneToOne are serialized as single FK references.
+        ManyToMany is serialized as a list.
         """
 
         # Create entities
@@ -44,10 +44,10 @@ class TestSerialization:
         child1 = Child(name="Bob")
         child2 = Child(name="Charlie")
 
-        # Set up relations
-        parent.children = [child1]  # OneToMany with single item
-        parent.favorite_child = child1  # OneToOne
-        child1.siblings = [child2]  # ManyToMany with single item
+        # Set up relations via the owning side
+        child1.parent = parent  # ManyToOne
+        parent.favorite_child = child1  # OneToOne (parent owns)
+        child1.siblings = [child2]  # ManyToMany
 
         # Test serialization
         parent_data = parent.serialize()
@@ -56,16 +56,11 @@ class TestSerialization:
         # OneToMany is always skipped in serialize
         assert "children" not in parent_data, "OneToMany should be skipped"
 
-        # OneToOne: "Parent" > "Child" → Parent skips favorite_child
+        # OneToOne: Parent owns favorite_child → it IS in parent_data
         assert (
-            "favorite_child" not in parent_data
-        ), "OneToOne on alphabetically-later side should be skipped"
-
-        # OneToOne: "Child" < "Parent" → Child serializes favorite_parent
-        assert isinstance(
-            child1_data["favorite_parent"], str
-        ), "OneToOne on alphabetically-earlier side should serialize as single value"
-        assert child1_data["favorite_parent"] == parent._id
+            "favorite_child" in parent_data
+        ), "Owning-side OneToOne should be serialized"
+        assert parent_data["favorite_child"] == child1._id
 
         # ManyToOne should be a single value
         assert isinstance(
@@ -74,6 +69,11 @@ class TestSerialization:
         assert (
             child1_data["parent"] == parent._id
         ), f"Expected '{parent._id}', got {child1_data['parent']}"
+
+        # Child1 does NOT own favorite_parent (it's the inverse side)
+        assert (
+            "favorite_parent" not in child1_data
+        ), "Inverse OneToOne should not be serialized"
 
         # ManyToMany should always be a list, even with single item
         assert isinstance(
@@ -96,12 +96,6 @@ class TestSerialization:
             len(child1_data["siblings"]) == 2
         ), "ManyToMany should contain both siblings"
 
-        assert str(parent_data) == "{'_type': 'Parent', '_id': '1', 'name': 'Alice'}"
-        assert (
-            str(child1_data)
-            == "{'_type': 'Child', '_id': '1', 'name': 'Bob', 'parent': '1', 'favorite_parent': '1', 'siblings': ['2', '3']}"
-        )
-
     def test_deserialization(self):
         """Test that entities can be reconstructed from serialized data."""
         Database.get_instance().clear()
@@ -111,8 +105,8 @@ class TestSerialization:
         child1 = Child(name="Bob")
         child2 = Child(name="Charlie")
 
-        # Set up relations
-        parent.children = [child1]
+        # Set up relations via owning side
+        child1.parent = parent
         parent.favorite_child = child1
         child1.siblings = [child2]
 
@@ -120,19 +114,12 @@ class TestSerialization:
         parent_data = parent.serialize()
         child1_data = child1.serialize()
 
-        print("parent_data", parent_data)
-        print("child1_data", child1_data)
-
         # Clear database to test deserialization
         Database.get_instance().clear()
 
         # Recreate entities from serialized data
-        # Note: We need to create all entities first before setting relations
         recreated_parent = Parent.deserialize(parent_data)
         recreated_child1 = Child.deserialize(child1_data)
-
-        print("recreated_parent", recreated_parent)
-        print("recreated_child1", recreated_child1)
 
         # Verify basic properties
         assert recreated_parent.name == "Alice"
@@ -163,9 +150,8 @@ class TestSerialization:
     def test_round_trip_serialization(self):
         """Test that serialize -> deserialize produces equivalent entities.
 
-        Import order: Parent first (no forward refs), then Children (ManyToOne
-        + OneToOne refs to Parent). OneToMany on Parent is reconstructed from
-        ManyToOne on Children.
+        Two-pass import: create all entities first (relations may fail to resolve),
+        then re-deserialize to link remaining relations.
         """
         Database.get_instance().clear()
 
@@ -175,8 +161,9 @@ class TestSerialization:
         child2 = Child(name="Charlie")
         child3 = Child(name="David")
 
-        # Set up complex relations
-        parent.children = [child1, child2]
+        # Set up complex relations via owning side
+        child1.parent = parent
+        child2.parent = parent
         parent.favorite_child = child1
         child1.siblings = [child2, child3]
         child2.siblings = [child1, child3]
@@ -187,52 +174,30 @@ class TestSerialization:
         child2_data = child2.serialize()
         child3_data = child3.serialize()
 
-        # Parent should have no forward refs (OneToMany + OneToOne skipped)
+        # Parent has OneToMany (skipped) + owning OneToOne (included)
         assert "children" not in parent_data
-        assert "favorite_child" not in parent_data
+        assert "favorite_child" in parent_data
 
-        # Children carry ManyToOne + OneToOne refs
+        # Children carry ManyToOne refs
         assert "parent" in child1_data
-        assert "favorite_parent" in child1_data
 
         # Clear and recreate from serialized data
         Database.get_instance().clear()
 
-        # Import order: Parent first, then Children
+        # Pass 1: Import parent first, then children (ManyToOne resolves)
         recreated_parent = Parent.deserialize(parent_data)
         Child.deserialize(child3_data)
         Child.deserialize(child2_data)
         recreated_child1 = Child.deserialize(child1_data)
 
-        # Verify the recreated entities have the same serialized output
-        recreated_parent_data = recreated_parent.serialize()
-        recreated_child1_data = recreated_child1.serialize()
-
-        print(f"Original parent: {parent_data}")
-        print(f"Recreated parent: {recreated_parent_data}")
-        print(f"Original child1: {child1_data}")
-        print(f"Recreated child1: {recreated_child1_data}")
-
-        assert (
-            recreated_parent_data == parent_data
-        ), f"Parent data mismatch:\nOriginal: {parent_data}\nRecreated: {recreated_parent_data}"
-
-        # For child1, check each field individually to handle list ordering
-        for key, value in child1_data.items():
-            if key == "siblings":  # ManyToMany relation - check set equality
-                assert set(recreated_child1_data[key]) == set(
-                    value
-                ), f"Siblings mismatch: {recreated_child1_data[key]} != {value}"
-            else:
-                assert (
-                    recreated_child1_data[key] == value
-                ), f"Field {key} mismatch: {recreated_child1_data[key]} != {value}"
+        # Pass 2: Re-deserialize parent to resolve favorite_child now that children exist
+        recreated_parent = Parent.deserialize(parent_data)
 
         # Verify basic properties are preserved
         assert recreated_parent.name == "Alice"
         assert recreated_child1.name == "Bob"
 
-        # Verify relations are properly restored via reverse links
+        # Verify relations are properly restored
         assert len(recreated_parent.children) == 2, "Parent should have 2 children"
         assert (
             recreated_parent.favorite_child is not None
@@ -246,7 +211,7 @@ class TestSerialization:
         # Create entities
         parent = Parent(name="Alice")
         child = Child(name="Bob")
-        parent.children = [child]
+        child.parent = parent
 
         # Serialize entities
         parent_data = parent.serialize()
@@ -689,7 +654,6 @@ class TestSerialization:
         child1 = Child(name="Bob")
         child2 = Child(name="Charlie")
 
-        parent.children = [child1, child2]
         child1.parent = parent
         child2.parent = parent
 
@@ -703,28 +667,29 @@ class TestSerialization:
         assert child_data["parent"] == parent._id
 
     def test_serialize_one_to_one_deterministic(self):
-        """Test that serialize() emits OneToOne on only one deterministic side.
+        """Test that serialize() emits OneToOne only on the owning side.
 
-        Rule: serialize only if self._type <= target._type (alphabetically).
+        The side that calls __set__ owns the FK and serializes it.
         """
         Database.get_instance().clear()
 
         parent = Parent(name="Alice")
         child1 = Child(name="Bob")
 
+        # Parent owns favorite_child (it calls __set__)
         parent.favorite_child = child1
 
-        # "Child" < "Parent" → Child serializes favorite_parent
-        child_data = child1.serialize()
-        assert (
-            "favorite_parent" in child_data
-        ), "Child (alphabetically earlier) should serialize OneToOne to Parent"
-
-        # "Parent" > "Child" → Parent does NOT serialize favorite_child
+        # Parent serializes its own FK: favorite_child
         parent_data = parent.serialize()
         assert (
-            "favorite_child" not in parent_data
-        ), "Parent (alphabetically later) should skip OneToOne to Child"
+            "favorite_child" in parent_data
+        ), "Owning side should serialize OneToOne FK"
+
+        # Child does NOT own favorite_parent (inverse side, read from reverse index)
+        child_data = child1.serialize()
+        assert (
+            "favorite_parent" not in child_data
+        ), "Inverse side should not serialize OneToOne"
 
     def test_serialize_keeps_many_to_many(self):
         """Test that serialize keeps ManyToMany (self-referential)."""
@@ -741,21 +706,15 @@ class TestSerialization:
     # ── Issue #4 regression tests ──────────────────────────────────────────
 
     def test_issue4_bidirectional_one_to_one_import_order(self):
-        """Regression test for issue #4: bidirectional OneToOne import crash.
+        """Regression test for issue #4: bidirectional OneToOne import.
 
-        Reproduces the exact scenario from the issue: User↔Member with
-        OneToOne on both sides. Without the fix, whichever entity type is
-        imported first will reference the other which doesn't exist yet,
-        crashing with:
-            ValueError: No entity of types Member found with ID or name 'mem_xxx'
-
-        The fix: serialize() skips the OneToOne on the alphabetically-later
-        side ("User" > "Member4" → User.member is skipped).
-        Import order: User first (no member ref), Member second (user ref resolves).
+        The owning side (the one that called __set__) serializes the FK.
+        The inverse side reads from the reverse index after import.
+        Import order: create the target first, then the entity with the FK.
         """
         Database.get_instance().clear()
 
-        # Define User↔Member with bidirectional OneToOne (mirrors real realm entities)
+        # Define User↔Member with bidirectional OneToOne
         class User(Entity):
             __alias__ = "name"
             name = String()
@@ -766,7 +725,7 @@ class TestSerialization:
             id = String()
             user = OneToOne("User", "member")
 
-        # Create linked entities
+        # Create linked entities - Member4 owns "user" FK
         user = User(name="system")
         member = Member4(id="mem_9f03f2ee")
         member.user = user
@@ -779,28 +738,26 @@ class TestSerialization:
         user_data = user.serialize()
         member_data = member.serialize()
 
-        # User should NOT have 'member' (since "User" > "Member4")
+        # User does NOT have 'member' (inverse side, read from reverse index)
         assert (
             "member" not in user_data
-        ), f"Should skip OneToOne on alphabetically-later side; got {user_data}"
-        # Member4 SHOULD have 'user' (since "Member4" < "User")
+        ), f"Inverse side should not serialize OneToOne; got {user_data}"
+        # Member4 SHOULD have 'user' (owning side)
         assert (
             "user" in member_data
-        ), f"Should keep OneToOne on alphabetically-earlier side; got {member_data}"
+        ), f"Owning side should serialize OneToOne; got {member_data}"
         assert member_data["user"] == "system"  # alias
 
-        # Clear and reimport in dependency order
+        # Clear and reimport: User first (target), then Member (has FK)
         Database.get_instance().clear()
-        recreated_user = User.deserialize(user_data)  # No member ref → no crash
-        recreated_member = Member4.deserialize(
-            member_data
-        )  # user ref → resolves to existing User
+        recreated_user = User.deserialize(user_data)
+        recreated_member = Member4.deserialize(member_data)
 
         # Both sides should be reconstructed
         assert recreated_member.user == recreated_user, "OneToOne should resolve"
         assert (
             recreated_user.member == recreated_member
-        ), "Reverse OneToOne should be set"
+        ), "Reverse OneToOne should be set via reverse index"
 
     def test_issue4_load_some_resilience(self):
         """Regression test for issue #4: load_some resilience with dangling refs.

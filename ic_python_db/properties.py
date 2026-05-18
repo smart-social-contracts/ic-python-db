@@ -323,7 +323,9 @@ class ManyToOne(Relation[E]):
             for type_name in self._get_allowed_types():
                 entity_class = db._entity_types.get(type_name)
                 if entity_class and db.load(type_name, old_ref):
-                    db.reverse_index_remove(type_name, old_ref, self.reverse_name, obj._id)
+                    db.reverse_index_remove(
+                        type_name, old_ref, self.reverse_name, obj._id
+                    )
                     break
 
         # Set new reference
@@ -466,7 +468,9 @@ class OneToOne(Relation[E]):
             for type_name in self._get_allowed_types():
                 entity_class = db._entity_types.get(type_name)
                 if entity_class and db.load(type_name, old_ref):
-                    db.reverse_index_remove(type_name, old_ref, self.reverse_name, obj._id)
+                    db.reverse_index_remove(
+                        type_name, old_ref, self.reverse_name, obj._id
+                    )
                     break
 
         # Enforce OneToOne exclusivity: if the target entity already has a direct
@@ -476,7 +480,9 @@ class OneToOne(Relation[E]):
             if existing_on_target is not None and existing_on_target != obj._id:
                 # The target already links to someone else via reverse relation.
                 # Clear that link and its reverse index entry.
-                db.reverse_index_remove(obj._type, existing_on_target, self.name, value._id)
+                db.reverse_index_remove(
+                    obj._type, existing_on_target, self.name, value._id
+                )
                 value.__dict__[f"_rel_{self.reverse_name}"] = None
                 value._save()
 
@@ -491,8 +497,16 @@ class OneToOne(Relation[E]):
                         ec = db._entity_types.get(tn)
                         if ec:
                             other_entity = ec.load(old_other_id)
-                            if other_entity and other_entity.__dict__.get(f"_rel_{self.reverse_name}") == obj._id:
-                                other_entity.__dict__[f"_rel_{self.reverse_name}"] = None
+                            if (
+                                other_entity
+                                and other_entity.__dict__.get(
+                                    f"_rel_{self.reverse_name}"
+                                )
+                                == obj._id
+                            ):
+                                other_entity.__dict__[f"_rel_{self.reverse_name}"] = (
+                                    None
+                                )
                                 other_entity._save()
                                 break
 
@@ -578,7 +592,9 @@ class ManyToMany(Relation[E]):
             for type_name in self._get_allowed_types():
                 entity_class = db._entity_types.get(type_name)
                 if entity_class and db.load(type_name, old_id):
-                    db.reverse_index_remove(type_name, old_id, self.reverse_name, obj._id)
+                    db.reverse_index_remove(
+                        type_name, old_id, self.reverse_name, obj._id
+                    )
                     break
 
         # Add new relations to both sides' indexes

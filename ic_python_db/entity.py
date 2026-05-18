@@ -449,7 +449,8 @@ class Entity:
             return []
         all_entities = cls.load_some(1, max_id)
         return [
-            e for e in all_entities
+            e
+            for e in all_entities
             if all(getattr(e, k, None) == v for k, v in d.items())
         ]
 
@@ -465,6 +466,7 @@ class Entity:
             List of entities
         """
         import warnings
+
         warnings.warn(
             "Entity.instances() is deprecated and will be removed. "
             "Use load_some() with pagination instead.",
@@ -591,7 +593,10 @@ class Entity:
                             entity_class = db._entity_types.get(type_name)
                             if entity_class and db.load(type_name, parent_ref):
                                 db.reverse_index_remove(
-                                    type_name, parent_ref, attr_value.reverse_name, self._id
+                                    type_name,
+                                    parent_ref,
+                                    attr_value.reverse_name,
+                                    self._id,
                                 )
                                 break
                 elif isinstance(attr_value, OneToOne):
@@ -602,7 +607,10 @@ class Entity:
                             entity_class = db._entity_types.get(type_name)
                             if entity_class and db.load(type_name, target_ref):
                                 db.reverse_index_remove(
-                                    type_name, target_ref, attr_value.reverse_name, self._id
+                                    type_name,
+                                    target_ref,
+                                    attr_value.reverse_name,
+                                    self._id,
                                 )
                                 break
                     # Also delete any reverse index where self is parent (inverse side)
@@ -618,7 +626,10 @@ class Entity:
                             entity_class = db._entity_types.get(type_name)
                             if entity_class and db.load(type_name, related_id):
                                 db.reverse_index_remove(
-                                    type_name, related_id, attr_value.reverse_name, self._id
+                                    type_name,
+                                    related_id,
+                                    attr_value.reverse_name,
+                                    self._id,
                                 )
                                 break
                     # Delete own index
@@ -751,9 +762,7 @@ class Entity:
                             ref, attr_value._get_allowed_types()
                         )
                 elif isinstance(attr_value, ManyToMany):
-                    related_ids = db.reverse_index_get(
-                        self._type, self._id, attr_name
-                    )
+                    related_ids = db.reverse_index_get(self._type, self._id, attr_name)
                     if related_ids:
                         data[attr_name] = [
                             self._resolve_ref_with_alias(
@@ -1025,4 +1034,3 @@ class Entity:
             Hash value
         """
         return hash((self._type, self._id))
-

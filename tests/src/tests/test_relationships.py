@@ -141,9 +141,7 @@ class TestRelationships:
         )
 
         # Verify OneToMany cannot be set directly
-        Tester.assert_raises(
-            AttributeError, lambda: setattr(dept, "employees", [emp1])
-        )
+        Tester.assert_raises(AttributeError, lambda: setattr(dept, "employees", [emp1]))
 
     def test_many_to_many(self):
         """Test many-to-many relationships."""
@@ -387,9 +385,9 @@ class TestReverseIndexResolution:
 
         # ManyToMany must resolve from reverse index
         students = loaded_course.students
-        assert len(students) == 2, (
-            f"Expected 2 students from reverse index, got {len(students)}."
-        )
+        assert (
+            len(students) == 2
+        ), f"Expected 2 students from reverse index, got {len(students)}."
         names = {s.name for s in students}
         assert names == {"Alice", "Bob"}
 

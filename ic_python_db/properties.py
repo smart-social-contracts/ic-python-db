@@ -526,6 +526,78 @@ class OneToOne(Relation[E]):
             obj._save()
 
 
+class ManyToManyList(list):
+    """List subclass returned by ManyToMany.__get__ that supports .add() and .remove()."""
+
+    def __init__(self, items, owner, prop):
+        super().__init__(items)
+        self._owner = owner
+        self._prop = prop
+
+    def add(self, entity):
+        """Add an entity to this many-to-many relationship."""
+        from .db_engine import Database
+        from .entity import Entity
+
+        if isinstance(entity, (str, int)):
+            resolved = self._prop.resolve_entity(self._owner, entity)
+        elif isinstance(entity, Entity):
+            resolved = entity
+        else:
+            raise TypeError(f"Cannot add {type(entity)} to ManyToMany relation")
+
+        self._prop.validate_entity(resolved)
+        db = Database.get_instance()
+
+        existing = db.reverse_index_get(
+            self._owner._type, self._owner._id, self._prop.name
+        )
+        if resolved._id not in existing:
+            db.reverse_index_add(
+                self._owner._type, self._owner._id, self._prop.name, resolved._id
+            )
+            db.reverse_index_add(
+                resolved._type, resolved._id, self._prop.reverse_name, self._owner._id
+            )
+            if not self._owner._do_not_save:
+                self._owner._save()
+        self.append(resolved)
+
+    def discard(self, entity):
+        """Remove an entity from this many-to-many relationship (no error if absent)."""
+        from .db_engine import Database
+        from .entity import Entity
+
+        if isinstance(entity, Entity):
+            entity_id = entity._id
+            entity_type = entity._type
+        else:
+            entity_id = str(entity)
+            entity_type = None
+
+        db = Database.get_instance()
+        db.reverse_index_remove(
+            self._owner._type, self._owner._id, self._prop.name, entity_id
+        )
+        if entity_type:
+            db.reverse_index_remove(
+                entity_type, entity_id, self._prop.reverse_name, self._owner._id
+            )
+        else:
+            for type_name in self._prop._get_allowed_types():
+                db.reverse_index_remove(
+                    type_name, entity_id, self._prop.reverse_name, self._owner._id
+                )
+
+        self[:] = [e for e in self if getattr(e, "_id", None) != entity_id]
+        if not self._owner._do_not_save:
+            self._owner._save()
+
+    def remove(self, entity):
+        """Remove an entity from this many-to-many relationship."""
+        self.discard(entity)
+
+
 class ManyToMany(Relation[E]):
     """Many-to-many relationship with bidirectional reverse indexes.
 
@@ -562,7 +634,7 @@ class ManyToMany(Relation[E]):
                     if entity:
                         entities.append(entity)
                         break
-        return entities  # type: ignore[return-value]
+        return ManyToManyList(entities, obj, self)  # type: ignore[return-value]
 
     def __set__(self, obj, values):
         from .db_engine import Database

@@ -8,19 +8,15 @@ from ic_python_db import *
 class Person(Entity):
     """Test entity class."""
 
-    # Example on how to override __init__
-    # def __init__(self, name: str, age: int = 0, **kwargs):
-    #     super().__init__(**kwargs)
-    #     self.name = name
-    #     self.age = age
-
     __alias__ = "name"
     name = String(min_length=2, max_length=50)
     age = Integer()
+    department = ManyToOne("Department", "employees")
 
 
 class Department(Entity):
     name = String(min_length=2, max_length=50)
+    employees = OneToMany("Person", "department")
 
 
 class TestEntity:
@@ -45,19 +41,19 @@ class TestEntity:
         assert loaded.age == 31
 
     def test_entity_relations(self):
-        """Test entity relations."""
-        person = Person(name="John")
+        """Test entity relations using ManyToOne/OneToMany descriptors."""
         dept = Department(name="IT")
+        person = Person(name="John")
 
-        # Test adding relation
-        person.add_relation("works_in", "has_employee", dept)
+        # Set relation via ManyToOne
+        person.department = dept
 
-        # Check person's relations
+        # Verify relationship from both sides
         loaded_person = Person[person._id]
         loaded_dept = Department[dept._id]
 
-        assert loaded_person.get_relations("works_in", "Department")[0] == dept
-        assert loaded_dept.get_relations("has_employee", "Person")[0] == person
+        assert loaded_person.department == dept
+        assert loaded_person in loaded_dept.employees
 
     def test_entity_duplicate_key(self):
         """Test that saving an entity with a duplicate ID raises an error."""
@@ -86,16 +82,16 @@ class TestEntity:
         assert Person["non_existent"] is None
 
     def test_entity_duplicate_relation(self):
-        """Test handling of duplicate relations."""
-        person = Person(name="John")
+        """Test that setting same relation twice doesn't duplicate."""
         dept = Department(name="IT")
+        person = Person(name="John")
 
-        # Adding same relation twice should only create one
-        person.add_relation("works_in", "has_employee", dept)
-        person.add_relation("works_in", "has_employee", dept)
+        # Setting same ManyToOne relation twice
+        person.department = dept
+        person.department = dept
 
-        loaded = Person[person._id]
-        assert len(loaded.get_relations("works_in", "Department")) == 1
+        # Should still only have one employee
+        assert len(dept.employees) == 1
 
     def test_entity_alias(self):
         """Test entity lookup by alias (__alias__ functionality)."""

@@ -476,7 +476,6 @@ class TestMigrations:
         profile = Profile(bio="Developer")
         user = User(name="Alice", profile=profile)
         user_id = user._id
-        profile_id = profile._id
 
         Database.get_instance().clear_registry()
 
@@ -511,14 +510,12 @@ class TestMigrations:
 
         assert loaded_user is not None
         assert loaded_user.name == "Alice"
-        # Verify migration renamed the relation field in stored data
+        # Verify migration renamed the relation field in stored data (owning side only)
         db = Database.get_instance()
         user_data = db.load("User", user_id)
-        profile_data = db.load("Profile", profile_id)
         assert "user_profile" in user_data
-        assert "user" in profile_data
-        # Note: Bidirectional relation consistency after field rename
-        # may require manual data fix or more complex migration logic
+        # Note: In the new architecture, only the owning side stores the FK.
+        # The inverse side (Profile) reads from the reverse index.
 
     def test_migration_persistence_verification(self):
         """Test that migration changes are persisted to database."""

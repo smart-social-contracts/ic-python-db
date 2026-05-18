@@ -366,6 +366,66 @@ class Database:
 
         return check_upgrade_compatibility(self, raise_on_error=raise_on_error)
 
+    # ── Reverse Index API ──────────────────────────────────────────────────────
+    #
+    # Reverse indexes allow OneToMany / ManyToMany / inverse-OneToOne relations
+    # to be resolved without scanning all child entities.
+    #
+    # Key format: _ri:{ParentType}:{parent_id}:{relation_name}
+    # Value: JSON array of child entity IDs, e.g. ["1", "2", "3"]
+
+    def _ri_key(self, parent_type: str, parent_id: str, relation_name: str) -> str:
+        return f"_ri:{parent_type}:{parent_id}:{relation_name}"
+
+    def reverse_index_get(
+        self, parent_type: str, parent_id: str, relation_name: str
+    ) -> List[str]:
+        """Read the reverse index for a parent entity's relation.
+
+        Returns:
+            List of child entity IDs, or empty list if no index exists.
+        """
+        key = self._ri_key(parent_type, parent_id, relation_name)
+        raw = self._db_storage.get(key)
+        if raw:
+            return json.loads(raw)
+        return []
+
+    def reverse_index_add(
+        self, parent_type: str, parent_id: str, relation_name: str, child_id: str
+    ) -> None:
+        """Add a child ID to a parent's reverse index."""
+        key = self._ri_key(parent_type, parent_id, relation_name)
+        raw = self._db_storage.get(key)
+        ids = json.loads(raw) if raw else []
+        if child_id not in ids:
+            ids.append(child_id)
+            self._db_storage.insert(key, json.dumps(ids))
+
+    def reverse_index_remove(
+        self, parent_type: str, parent_id: str, relation_name: str, child_id: str
+    ) -> None:
+        """Remove a child ID from a parent's reverse index."""
+        key = self._ri_key(parent_type, parent_id, relation_name)
+        raw = self._db_storage.get(key)
+        if not raw:
+            return
+        ids = json.loads(raw)
+        if child_id in ids:
+            ids.remove(child_id)
+            if ids:
+                self._db_storage.insert(key, json.dumps(ids))
+            else:
+                self._db_storage.remove(key)
+
+    def reverse_index_delete(
+        self, parent_type: str, parent_id: str, relation_name: str
+    ) -> None:
+        """Delete an entire reverse index entry (used when parent is deleted)."""
+        key = self._ri_key(parent_type, parent_id, relation_name)
+        if self._db_storage.get(key) is not None:
+            self._db_storage.remove(key)
+
     def get_audit(
         self, id_from: Optional[int] = None, id_to: Optional[int] = None
     ) -> Dict[str, str]:

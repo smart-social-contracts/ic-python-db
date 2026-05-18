@@ -1,28 +1,28 @@
-"""Property definitions for Entity classes."""
+"""Property definitions for Entity classes.
+
+Relation properties (ManyToOne, OneToMany, OneToOne, ManyToMany) use persisted
+reverse indexes in stable storage so that relationships can be resolved without
+scanning all entities.
+"""
 
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Generic,
-    Iterator,
     List,
     Optional,
     Type,
     TypeVar,
     Union,
-    overload,
 )
 
 if TYPE_CHECKING:
     from .entity import Entity
 
-# TypeVar for property value types
 T = TypeVar("T")
-# TypeVar for entity types in relations
 E = TypeVar("E", bound="Entity")
 
-# Prefix used for storing property values in entity __dict__
 PROPERTY_STORAGE_PREFIX = "prop"
 
 
@@ -30,13 +30,6 @@ class Property(Generic[T]):
     """Definition of an entity property.
 
     A generic descriptor class that provides type-safe property access.
-    The type parameter T indicates the type of value this property holds.
-
-    Attributes:
-        name: Name of the property
-        type: Type of the property (e.g. str, int)
-        default: Default value if not set
-        validator: Optional function to validate values
     """
 
     name: str
@@ -57,29 +50,19 @@ class Property(Generic[T]):
         self.validator = validator
 
     def __set_name__(self, owner: type, name: str) -> None:
-        """Set the property name when class is created."""
         self.name = name
-
-    @overload
-    def __get__(self, obj: None, objtype: Optional[type]) -> "Property[T]": ...
-
-    @overload
-    def __get__(self, obj: object, objtype: Optional[type]) -> Optional[T]: ...
 
     def __get__(
         self, obj: object, objtype: Optional[type] = None
     ) -> Union["Property[T]", Optional[T]]:
-        """Get the property value."""
         if obj is None:
-            return self
+            return self  # type: ignore[return-value]
         return obj.__dict__.get(f"_{PROPERTY_STORAGE_PREFIX}_{self.name}", self.default)
 
     def __set__(self, obj, value):
-        """Set the property value with type checking and validation."""
         from .constants import ACTION_CREATE, ACTION_MODIFY
         from .hooks import call_entity_hook
 
-        # Get old value and determine action
         old_value = obj.__dict__.get(
             f"_{PROPERTY_STORAGE_PREFIX}_{self.name}", self.default
         )
@@ -89,7 +72,6 @@ class Property(Generic[T]):
             else ACTION_MODIFY
         )
 
-        # Call hook before setting
         allow, modified_value = call_entity_hook(
             obj, self.name, old_value, value, action
         )
@@ -185,113 +167,47 @@ class Boolean(Property[bool]):
         super().__init__(name="", type=bool, default=default)
 
 
+# ── Relation Properties ───────────────────────────────────────────────────────
+
+
 class Relation(Generic[E]):
-    """Base property for defining and accessing relations.
+    """Base class for relation properties.
 
-    This is the base class for all relation properties. It provides common functionality
-    for managing relationships between entities.
-
-    For one-to-one relationships (default), this property returns a single entity and
-    enforces single cardinality. For one-to-many or many-to-many relationships, it
-    returns a list of entities.
-
-    The type parameter E indicates the type of related entity.
+    Provides shared utilities for resolving and validating related entities.
+    Subclasses implement specific relationship semantics using persisted
+    reverse indexes.
     """
 
     name: Optional[str]
     entity_types: Union[str, List[str]]
     reverse_name: Optional[str]
-    many: bool
 
     def __init__(
         self,
         entity_types: Union[str, List[str]],
         reverse_name: Optional[str] = None,
-        many: bool = False,
     ):
-        """Initialize relation property.
-
-        Args:
-            entity_types: Type names of related entities
-            reverse_name: Optional name for reverse relation
-            many: Whether this property can hold multiple entities (default: False)
-        """
         self.entity_types = entity_types
         self.name = None
         self.reverse_name = reverse_name
-        self.many = many
 
     def __set_name__(self, owner: type, name: str) -> None:
-        """Set the property name when class is created."""
         self.name = name
         if self.reverse_name is None:
             self.reverse_name = name
 
-    @overload
-    def __get__(self, obj: None, objtype: Optional[type]) -> "Relation[E]": ...
+    @property
+    def many(self) -> bool:
+        """Whether this relation holds multiple entities."""
+        return isinstance(self, (OneToMany, ManyToMany))
 
-    @overload
-    def __get__(
-        self, obj: object, objtype: Optional[type]
-    ) -> Union[Optional[E], List[E]]: ...
-
-    def __get__(
-        self, obj: object, objtype: Optional[type] = None
-    ) -> Union["Relation[E]", Optional[E], List[E]]:
-        """Get related entities."""
-        if obj is None:
-            return self
-        relations = obj.get_relations(self.name)
-        if not self.many:
-            # For single relationships, return the first entity or None
-            return relations[0] if relations else None
-        return relations
-
-    def __set__(self, obj, value):
-        """Set related entities.
-
-        Args:
-            value: For many=False: a single Entity instance
-                  For many=True: a list/tuple of Entity instances
-        """
-        if self.many:
-            if not isinstance(value, (list, tuple)):
-                raise TypeError(f"{self.name} requires a list or tuple of entities")
-            values_list = value
-        else:
-            values_list = [value]
-
-        # Get existing and new relations as sets
-        existing = set(obj.get_relations(self.name))
-        new = set(values_list)
-
-        # For one-to-many, check if entities have existing relations
-        if isinstance(self, OneToMany):
-            for entity in new:
-                existing_relations = entity.get_relations(self.reverse_name)
-                if existing_relations:
-                    old_relation = existing_relations[0]
-                    if old_relation != obj:
-                        # Remove the entity from the old relation's list
-                        old_relation._relations[self.name].remove(entity)
-                        # Remove the old relation from the entity's list
-                        entity._relations[self.reverse_name].remove(old_relation)
-
-        # Remove relations that are not in new set
-        to_remove = existing - new
-        for entity in to_remove:
-            obj.remove_relation(self.name, self.reverse_name, entity)
-
-        # Add relations that are not in existing set
-        to_add = new - existing
-        for entity in to_add:
-            obj.add_relation(self.name, self.reverse_name, entity)
+    def _get_allowed_types(self) -> List[str]:
+        if isinstance(self.entity_types, str):
+            return [self.entity_types]
+        return list(self.entity_types)
 
     def validate_entity(self, entity: Any) -> bool:
-        """Validate that an entity is of the correct type.
-
-        Handles both namespaced (e.g., "app::User") and non-namespaced (e.g., "User") types.
-        """
+        """Validate that an entity is of the correct type."""
         from .entity import Entity
 
         if entity is None:
@@ -299,17 +215,8 @@ class Relation(Generic[E]):
         if not isinstance(entity, Entity):
             raise TypeError(f"{self.name} must be set to Entity instances")
 
-        # Convert entity_types to list for uniform handling
-        allowed_types = (
-            [self.entity_types]
-            if isinstance(self.entity_types, str)
-            else self.entity_types
-        )
-
-        # Check if entity type matches any allowed type
-        # This handles both exact matches and namespace variations
+        allowed_types = self._get_allowed_types()
         if entity._type not in allowed_types:
-            # Also check if the class name matches (for backward compatibility)
             entity_class_name = (
                 entity._type.split("::")[-1] if "::" in entity._type else entity._type
             )
@@ -319,22 +226,13 @@ class Relation(Generic[E]):
             )
             if not type_matches:
                 raise TypeError(
-                    f"{self.name} must be set an Entity instance of any of the following types: {self.entity_types}, "
-                    f"but got type '{entity._type}'"
+                    f"{self.name} must be an Entity of type {self.entity_types}, "
+                    f"but got '{entity._type}'"
                 )
-
         return True
 
     def resolve_entity(self, obj: Any, value: Any) -> Optional[E]:
-        """Resolve a value to an Entity instance.
-
-        Args:
-            obj: The entity object that owns this relation
-            value: Can be an Entity instance, string ID, or string name/alias
-
-        Returns:
-            Entity instance or None
-        """
+        """Resolve a value (Entity, ID string, or alias) to an Entity instance."""
         from .entity import Entity
 
         if value is None:
@@ -344,23 +242,14 @@ class Relation(Generic[E]):
             return value  # type: ignore[return-value]
 
         if isinstance(value, (str, int)):
-            # Try to find entity by ID or name (alias) using each allowed entity type
-            entity_types = (
-                [self.entity_types]
-                if isinstance(self.entity_types, str)
-                else self.entity_types
-            )
-            for entity_type_name in entity_types:
-                # Get the entity class from the database registry
+            for entity_type_name in self._get_allowed_types():
                 entity_class = obj.db()._entity_types.get(entity_type_name)
-
                 if entity_class:
                     found_entity = entity_class[value]
                     if found_entity:
                         return found_entity
-
             raise ValueError(
-                f"No entity of types {self.entity_types} found with ID or name '{value}'"
+                f"No entity of type {self.entity_types} found with ID or name '{value}'"
             )
 
         raise TypeError(
@@ -368,51 +257,140 @@ class Relation(Generic[E]):
         )
 
 
-class RelationList(Generic[E]):
-    """Helper class for managing lists of related entities."""
+class ManyToOne(Relation[E]):
+    """Many-to-one relationship (child stores FK to parent).
 
-    def __init__(self, obj: Any, prop: "Relation[E]"):
-        self.obj = obj
-        self.prop = prop
+    This is the "owning" side. Setting this property:
+    - Stores the parent's ID on the child entity
+    - Updates the parent's reverse index so it can find this child
 
-    def add(self, entity: Union[E, str, int]) -> None:
-        """Add a new relation."""
-        # Resolve entity (supports string ID/name)
-        resolved = self.prop.resolve_entity(self.obj, entity)
+    Example:
+        class Employee(Entity):
+            department = ManyToOne('Department', 'employees')
 
-        # Validate entity type using the base validate_entity method
-        self.prop.validate_entity(resolved)
+        class Department(Entity):
+            employees = OneToMany('Employee', 'department')
+    """
 
-        # For one-to-many, check if entity already has a relation
-        if isinstance(self.prop, OneToMany):
-            existing_relations = resolved.get_relations(self.prop.reverse_name)
-            if existing_relations:
-                # Remove existing relation since it's one-to-many
-                old_relation = existing_relations[0]
-                # Remove the entity from the old relation's list
-                if old_relation != self.obj:
-                    old_relation._relations[self.prop.name].remove(resolved)
-                    # Remove the old relation from the entity's list
-                    resolved._relations[self.prop.reverse_name].remove(old_relation)
+    def __init__(
+        self, entity_types: Union[str, List[str]], reverse_name: Optional[str] = None
+    ):
+        super().__init__(entity_types, reverse_name)
 
-        self.obj.add_relation(self.prop.name, self.prop.reverse_name, resolved)
+    def __get__(
+        self, obj: object, objtype: Optional[type] = None
+    ) -> Union["ManyToOne[E]", Optional[E]]:
+        if obj is None:
+            return self  # type: ignore[return-value]
+        parent_ref = obj.__dict__.get(f"_rel_{self.name}")
+        if parent_ref is None:
+            return None
+        for type_name in self._get_allowed_types():
+            entity_class = obj.db()._entity_types.get(type_name)
+            if entity_class:
+                entity = entity_class.load(parent_ref)
+                if entity:
+                    return entity  # type: ignore[return-value]
+        return None
 
-    def remove(self, entity: Union[E, str, int]) -> None:
-        """Remove a relation."""
-        self.obj.remove_relation(self.prop.name, self.prop.reverse_name, entity)
+    def __set__(self, obj, value):
+        from .db_engine import Database
+        from .entity import Entity
 
-    def __iter__(self) -> "Iterator[E]":
-        return iter(self.obj.get_relations(self.prop.name))
+        # Fast path: loading from DB — just store the raw reference, indexes are intact
+        if getattr(obj, "_do_not_save", False) and getattr(obj, "_loaded", False):
+            if value is None:
+                obj.__dict__[f"_rel_{self.name}"] = None
+            elif isinstance(value, Entity):
+                obj.__dict__[f"_rel_{self.name}"] = value._id
+            else:
+                obj.__dict__[f"_rel_{self.name}"] = str(value)
+            return
 
-    def __len__(self) -> int:
-        return len(self.obj.get_relations(self.prop.name))
+        if value is not None:
+            if isinstance(value, (list, tuple)):
+                raise ValueError(
+                    f"{self.name} cannot be set to multiple values (many-to-one)"
+                )
+            value = self.resolve_entity(obj, value)
+            self.validate_entity(value)
+
+        db = Database.get_instance()
+        old_ref = obj.__dict__.get(f"_rel_{self.name}")
+
+        # Remove from old parent's reverse index
+        if old_ref is not None and obj._id is not None:
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                if entity_class and db.load(type_name, old_ref):
+                    db.reverse_index_remove(
+                        type_name, old_ref, self.reverse_name, obj._id
+                    )
+                    break
+
+        # Set new reference
+        if value is not None:
+            obj.__dict__[f"_rel_{self.name}"] = value._id
+            if obj._id is not None:
+                db.reverse_index_add(value._type, value._id, self.reverse_name, obj._id)
+        else:
+            obj.__dict__[f"_rel_{self.name}"] = None
+
+        if not obj._do_not_save:
+            obj._save()
+
+
+class OneToMany(Relation[E]):
+    """One-to-many relationship (parent side, resolved via reverse index).
+
+    Accessing this property reads the persisted reverse index to find child
+    IDs, then loads each child. No scanning required.
+
+    Example:
+        class Department(Entity):
+            employees = OneToMany('Employee', 'department')
+
+        class Employee(Entity):
+            department = ManyToOne('Department', 'employees')
+    """
+
+    def __init__(self, entity_types: Union[str, List[str]], reverse_name: str):
+        super().__init__(entity_types, reverse_name)
+
+    def __get__(
+        self, obj: object, objtype: Optional[type] = None
+    ) -> Union["OneToMany[E]", List[E]]:
+        if obj is None:
+            return self  # type: ignore[return-value]
+
+        from .db_engine import Database
+
+        db = Database.get_instance()
+        child_ids = db.reverse_index_get(obj._type, obj._id, self.name)
+
+        children = []
+        for child_id in child_ids:
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                if entity_class:
+                    child = entity_class.load(child_id)
+                    if child:
+                        children.append(child)
+                        break
+        return children  # type: ignore[return-value]
+
+    def __set__(self, obj, values):
+        raise AttributeError(
+            f"Cannot set OneToMany '{self.name}' directly. "
+            f"Set the ManyToOne '{self.reverse_name}' on each child instead."
+        )
 
 
 class OneToOne(Relation[E]):
-    """Property for defining one-to-one relationships.
+    """One-to-one relationship.
 
-    This property type represents a one-to-one relationship where each entity
-    can be related to exactly one entity on the other side.
+    The "owning" side stores the FK and updates the reverse index.
+    The "inverse" side resolves via the reverse index.
 
     Example:
         class Person(Entity):
@@ -427,161 +405,131 @@ class OneToOne(Relation[E]):
         entity_types: Union[str, List[str]],
         reverse_name: Optional[str] = None,
     ):
-        super().__init__(entity_types, reverse_name, many=False)
-
-    def __set__(self, obj, value):
-        """Set the related entity with one-to-one constraints."""
-        if value is not None:
-            # Check if trying to set multiple values
-            if isinstance(value, (list, tuple)):
-                raise ValueError(
-                    f"{self.name} cannot be set to multiple values (one-to-one relationship)"
-                )
-
-            # Validate entity type
-            value = self.resolve_entity(obj, value)
-
-            # Check that the reverse property is OneToOne
-            reverse_prop = value.__class__.__dict__.get(self.reverse_name)
-            if not isinstance(reverse_prop, OneToOne):
-                raise ValueError(
-                    f"Reverse property '{self.reverse_name}' must be OneToOne"
-                )
-
-            # Get current value if any
-            current = self.__get__(obj)
-            if current is value:
-                return
-            if current is not None:
-                # Remove existing relation
-                obj.remove_relation(self.name, self.reverse_name, current)
-
-            # Check if value is already related to another entity and remove that relation
-            existing = value.get_relations(self.reverse_name)
-            if existing:
-                existing_entity = existing[0]
-                if existing_entity is obj:
-                    return
-                # Remove the existing relation from both sides
-                existing_entity.remove_relation(self.name, self.reverse_name, value)
-                value.remove_relation(self.reverse_name, self.name, existing_entity)
-
-        # Set the new relation
-        super().__set__(obj, value)
-
-
-class OneToMany(Relation[E]):
-    """Property for defining one-to-many relationships.
-
-    This property type represents a one-to-many relationship where the 'one' side
-    owns multiple instances of the 'many' side, but each 'many' instance belongs to
-    only one owner.
-
-    Example:
-        class Department(Entity):
-            employees = OneToMany('Employee', 'department')
-
-        class Employee(Entity):
-            department = ManyToOne('Department', 'employees')
-    """
-
-    def __init__(self, entity_types: Union[str, List[str]], reverse_name: str):
-        super().__init__(entity_types, reverse_name, many=True)
-
-    def __set__(self, obj, values):
-        """Set related entities with one-to-many constraints."""
-        if not isinstance(values, (list, tuple)):
-            raise TypeError(f"{self.name} must be set to a list of entities")
-
-        resolved_values = []
-        for value in values:
-            # Resolve value to Entity instance
-            resolved_value = self.resolve_entity(obj, value)
-
-            # Validate entity type using the base validate_entity method
-            self.validate_entity(resolved_value)
-            resolved_values.append(resolved_value)
-
-            # Check that the reverse property is ManyToOne
-            reverse_prop = resolved_value.__class__.__dict__.get(self.reverse_name)
-            if not isinstance(reverse_prop, ManyToOne):
-                raise ValueError(
-                    f"Reverse property '{self.reverse_name}' must be ManyToOne"
-                )
-
-        # Replace original values with resolved entities
-        super().__set__(obj, resolved_values)
-
-    @overload
-    def __get__(self, obj: None, objtype: Optional[type]) -> "OneToMany[E]": ...
-
-    @overload
-    def __get__(self, obj: object, objtype: Optional[type]) -> "RelationList[E]": ...
+        super().__init__(entity_types, reverse_name)
 
     def __get__(
         self, obj: object, objtype: Optional[type] = None
-    ) -> Union["OneToMany[E]", "RelationList[E]"]:
-        """Get related entities as a RelationList."""
+    ) -> Union["OneToOne[E]", Optional[E]]:
         if obj is None:
-            return self
-        return RelationList(obj, self)
+            return self  # type: ignore[return-value]
 
+        from .db_engine import Database
 
-class ManyToOne(Relation[E]):
-    """Property for defining many-to-one relationships.
+        # Check if this side stores the FK (owning side)
+        local_ref = obj.__dict__.get(f"_rel_{self.name}")
+        if local_ref is not None:
+            for type_name in self._get_allowed_types():
+                entity_class = obj.db()._entity_types.get(type_name)
+                if entity_class:
+                    entity = entity_class.load(local_ref)
+                    if entity:
+                        return entity  # type: ignore[return-value]
+            return None
 
-    This property type represents a many-to-one relationship where multiple entities
-    can belong to a single owner entity.
-
-    Example:
-        class Employee(Entity):
-            department = ManyToOne('Department', 'employees')
-
-        class Department(Entity):
-            employees = OneToMany('Employee', 'department')
-    """
-
-    def __init__(
-        self, entity_types: Union[str, List[str]], reverse_name: Optional[str] = None
-    ):
-        super().__init__(entity_types, reverse_name, many=False)
+        # Inverse side: check reverse index
+        db = Database.get_instance()
+        child_ids = db.reverse_index_get(obj._type, obj._id, self.name)
+        if child_ids:
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                if entity_class:
+                    entity = entity_class.load(child_ids[0])
+                    if entity:
+                        return entity  # type: ignore[return-value]
+        return None
 
     def __set__(self, obj, value):
-        """Set the related entity with many-to-one constraints."""
+        from .db_engine import Database
+        from .entity import Entity
+
+        # Fast path: loading from DB — just store the raw reference, indexes are intact
+        if getattr(obj, "_do_not_save", False) and getattr(obj, "_loaded", False):
+            if value is None:
+                obj.__dict__[f"_rel_{self.name}"] = None
+            elif isinstance(value, Entity):
+                obj.__dict__[f"_rel_{self.name}"] = value._id
+            else:
+                obj.__dict__[f"_rel_{self.name}"] = str(value)
+            return
+
         if value is not None:
-            # Check if trying to set multiple values
             if isinstance(value, (list, tuple)):
                 raise ValueError(
-                    f"{self.name} cannot be set to multiple values (many-to-one relationship)"
+                    f"{self.name} cannot be set to multiple values (one-to-one)"
                 )
-
-            # Resolve value to Entity instance
             value = self.resolve_entity(obj, value)
-
-            # Validate entity type using the base validate_entity method
             self.validate_entity(value)
 
-            # Check that the reverse property is OneToMany
-            # Use getattr to walk MRO so inherited relations are found
-            reverse_prop = getattr(value.__class__, self.reverse_name, None)
-            if not reverse_prop:
-                raise ValueError(
-                    f"Reverse property '{self.reverse_name}' not found in {value.__class__.__name__} entity"
-                )
+        db = Database.get_instance()
+        old_ref = obj.__dict__.get(f"_rel_{self.name}")
 
-            if not isinstance(reverse_prop, OneToMany):
-                raise ValueError(
-                    f"Reverse property '{self.reverse_name}' must be OneToMany and it is '{reverse_prop.__class__.__name__}'"
-                )
+        # Remove from old target's reverse index
+        if old_ref is not None and obj._id is not None:
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                if entity_class and db.load(type_name, old_ref):
+                    db.reverse_index_remove(
+                        type_name, old_ref, self.reverse_name, obj._id
+                    )
+                    break
 
-        super().__set__(obj, value)
+        # Enforce OneToOne exclusivity: if the target entity already has a direct
+        # FK on the reverse relation pointing to a different entity, clear it.
+        if value is not None:
+            existing_on_target = value.__dict__.get(f"_rel_{self.reverse_name}")
+            if existing_on_target is not None and existing_on_target != obj._id:
+                # The target already links to someone else via reverse relation.
+                # Clear that link and its reverse index entry.
+                db.reverse_index_remove(
+                    obj._type, existing_on_target, self.name, value._id
+                )
+                value.__dict__[f"_rel_{self.reverse_name}"] = None
+                value._save()
+
+            # Also check if obj was previously linked via reverse index (inverse side)
+            # e.g., if someone else set "other.rel = obj" previously
+            existing_in_ri = db.reverse_index_get(obj._type, obj._id, self.name)
+            for old_other_id in existing_in_ri:
+                if old_other_id != value._id:
+                    db.reverse_index_remove(obj._type, obj._id, self.name, old_other_id)
+                    # Clear the other entity's direct FK
+                    for tn in self._get_allowed_types():
+                        ec = db._entity_types.get(tn)
+                        if ec:
+                            other_entity = ec.load(old_other_id)
+                            if (
+                                other_entity
+                                and other_entity.__dict__.get(
+                                    f"_rel_{self.reverse_name}"
+                                )
+                                == obj._id
+                            ):
+                                other_entity.__dict__[f"_rel_{self.reverse_name}"] = (
+                                    None
+                                )
+                                other_entity._save()
+                                break
+
+        # Set new reference
+        if value is not None:
+            obj.__dict__[f"_rel_{self.name}"] = value._id
+            if obj._id is not None:
+                db.reverse_index_add(value._type, value._id, self.reverse_name, obj._id)
+        else:
+            obj.__dict__[f"_rel_{self.name}"] = None
+            # Also clear any reverse index entries pointing at obj for this relation
+            existing_in_ri = db.reverse_index_get(obj._type, obj._id, self.name)
+            for old_other_id in existing_in_ri:
+                db.reverse_index_remove(obj._type, obj._id, self.name, old_other_id)
+
+        if not obj._do_not_save:
+            obj._save()
 
 
 class ManyToMany(Relation[E]):
-    """Property for defining many-to-many relationships.
+    """Many-to-many relationship with bidirectional reverse indexes.
 
-    This property type represents a many-to-many relationship where entities
-    on both sides can be related to multiple entities on the other side.
+    Both sides maintain a reverse index. Setting on either side updates both.
 
     Example:
         class Student(Entity):
@@ -592,53 +540,67 @@ class ManyToMany(Relation[E]):
     """
 
     def __init__(self, entity_types: Union[str, List[str]], reverse_name: str):
-        super().__init__(entity_types, reverse_name, many=True)
-
-    def __set__(self, obj, values):
-        """Set related entities with many-to-many constraints."""
-        from .entity import Entity
-
-        # Convert single entity to list for convenience
-        if isinstance(values, Entity):
-            values = [values]
-        elif isinstance(values, (str, int)):
-            # Handle single string ID/name
-            values = [values]
-        elif values is not None and not isinstance(values, (list, tuple)):
-            raise TypeError(f"{self.name} must be set to an entity or list of entities")
-
-        if values is not None:
-            resolved_values = []
-            for value in values:
-                # Resolve value to Entity instance
-                resolved_value = self.resolve_entity(obj, value)
-
-                # Validate entity type using the base validate_entity method
-                self.validate_entity(resolved_value)
-                resolved_values.append(resolved_value)
-
-                # Check that the reverse property is ManyToMany
-                reverse_prop = resolved_value.__class__.__dict__.get(self.reverse_name)
-                if not isinstance(reverse_prop, ManyToMany):
-                    raise ValueError(
-                        f"Reverse property '{self.reverse_name}' must be ManyToMany"
-                    )
-
-            # Replace original values with resolved entities
-            values = resolved_values
-
-        super().__set__(obj, values)
-
-    @overload
-    def __get__(self, obj: None, objtype: Optional[type]) -> "ManyToMany[E]": ...
-
-    @overload
-    def __get__(self, obj: object, objtype: Optional[type]) -> "RelationList[E]": ...
+        super().__init__(entity_types, reverse_name)
 
     def __get__(
         self, obj: object, objtype: Optional[type] = None
-    ) -> Union["ManyToMany[E]", "RelationList[E]"]:
-        """Get related entities as a RelationList."""
+    ) -> Union["ManyToMany[E]", List[E]]:
         if obj is None:
-            return self
-        return RelationList(obj, self)
+            return self  # type: ignore[return-value]
+
+        from .db_engine import Database
+
+        db = Database.get_instance()
+        related_ids = db.reverse_index_get(obj._type, obj._id, self.name)
+
+        entities = []
+        for related_id in related_ids:
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                if entity_class:
+                    entity = entity_class.load(related_id)
+                    if entity:
+                        entities.append(entity)
+                        break
+        return entities  # type: ignore[return-value]
+
+    def __set__(self, obj, values):
+        from .db_engine import Database
+        from .entity import Entity
+
+        if values is None:
+            values = []
+        if isinstance(values, Entity):
+            values = [values]
+        elif isinstance(values, (str, int)):
+            values = [values]
+        elif not isinstance(values, (list, tuple)):
+            raise TypeError(f"{self.name} must be set to an entity or list of entities")
+
+        resolved = []
+        for v in values:
+            entity = self.resolve_entity(obj, v)
+            self.validate_entity(entity)
+            resolved.append(entity)
+
+        db = Database.get_instance()
+
+        # Remove old relations from both sides' indexes
+        old_ids = db.reverse_index_get(obj._type, obj._id, self.name)
+        for old_id in old_ids:
+            db.reverse_index_remove(obj._type, obj._id, self.name, old_id)
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                if entity_class and db.load(type_name, old_id):
+                    db.reverse_index_remove(
+                        type_name, old_id, self.reverse_name, obj._id
+                    )
+                    break
+
+        # Add new relations to both sides' indexes
+        for entity in resolved:
+            db.reverse_index_add(obj._type, obj._id, self.name, entity._id)
+            db.reverse_index_add(entity._type, entity._id, self.reverse_name, obj._id)
+
+        if not obj._do_not_save:
+            obj._save()

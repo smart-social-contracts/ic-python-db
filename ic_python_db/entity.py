@@ -71,7 +71,6 @@ class Entity:
         _id (str): Unique sequential identifier ("1", "2", "3", ...)
         _loaded (bool): True if loaded from DB, False if newly created
         _counted (bool): True if entity has been counted (prevents double-counting)
-        _relations (dict): Dictionary mapping relation names to related entities
         _do_not_save (bool): Temporary flag to prevent saving during initialization
 
     Class-level attributes:
@@ -160,8 +159,6 @@ class Entity:
         self._id = None if kwargs.get("_id") is None else kwargs["_id"]
         self._loaded = False if kwargs.get("_loaded") is None else kwargs["_loaded"]
         self._counted = False  # Track if this entity has been counted
-
-        self._relations = {}
 
         # Add to context
         self.__class__._context.add(self)
@@ -439,62 +436,62 @@ class Entity:
         if stored_version != current_version:
             entity._save()
 
-        # Restore legacy "relations" block if present in serialized data.
-        # Otherwise keep the _relations that __init__ already populated
-        # via relationship descriptors (OneToMany, ManyToOne, etc.).
-        if "relations" in data:
-            relations_data = data.pop("relations")
-            relations = {}
-            for rel_name, rel_refs in relations_data.items():
-                relations[rel_name] = []
-                for ref in rel_refs:
-                    related = (
-                        Entity.db()
-                        ._entity_types[ref["_type"]]
-                        .load(ref["_id"], level=level - 1)
-                    )
-                    if related:
-                        relations[rel_name].append(related)
-            entity._relations = relations
-
         return entity
 
     @classmethod
     def find(cls: Type[T], d) -> List[T]:
-        D = d
-        L = [_.serialize() for _ in cls.instances()]
+        """Find entities matching a dictionary filter.
+
+        Uses load_some over the full ID range. Prefer indexed lookups where possible.
+        """
+        max_id = cls.max_id()
+        if max_id == 0:
+            return []
+        all_entities = cls.load_some(1, max_id)
         return [
-            cls.load(d["_id"]) for d in L if all(d.get(k) == v for k, v in D.items())
+            e
+            for e in all_entities
+            if all(getattr(e, k, None) == v for k, v in d.items())
         ]
 
     @classmethod
     def instances(cls: Type[T]) -> List[T]:
         """Get all instances of this entity type, including subclass instances.
 
-        Uses load_some() for O(max_id) performance instead of scanning all keys.
+        .. deprecated::
+            This method loads ALL entities and is O(max_id). Prefer load_some()
+            with pagination or use relationship accessors.
 
         Returns:
             List of entities
         """
+        try:
+            import warnings
+
+            warnings.warn(
+                "Entity.instances() is deprecated and will be removed. "
+                "Use load_some() with pagination instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        except (ImportError, AttributeError):
+            pass
         db = Database.get_instance()
         full_type_name = cls.get_full_type_name()
         db.register_entity_type(cls, full_type_name)
 
-        # Use load_some for O(max_id) instead of O(total_keys)
         max_id = cls.max_id()
         if max_id == 0:
             instances = []
         else:
             instances = cls.load_some(1, max_id)
 
-        # Also check for subclass instances
-        # Track processed classes to avoid duplicates when types are registered under multiple names
         processed_classes = {cls}
         for type_name, type_cls in db._entity_types.items():
             if type_cls in processed_classes:
-                continue  # Skip already processed classes
+                continue
             if type_name == full_type_name or type_name == cls.__name__:
-                continue  # Skip self
+                continue
             if db.is_subclass(type_name, cls):
                 processed_classes.add(type_cls)
                 subclass_max_id = type_cls.max_id()
@@ -572,10 +569,11 @@ class Entity:
         return ret
 
     def delete(self) -> None:
+        """Delete this entity from the database, cleaning up all reverse indexes."""
         logger.debug(f"Deleting entity {self._type}@{self._id}")
-        """Delete this entity from the database."""
         from .constants import ACTION_DELETE
         from .hooks import call_entity_hook
+        from .properties import ManyToMany, ManyToOne, OneToMany, OneToOne
 
         # Call hook before deletion
         allow, _ = call_entity_hook(self, None, self, None, ACTION_DELETE)
@@ -583,17 +581,74 @@ class Entity:
         if not allow:
             raise PermissionError("Hook rejected entity deletion")
 
-        self.db().delete(self._type, self._id)
+        db = self.db()
+
+        # Clean up reverse indexes for all relation properties
+        for cls in reversed(self.__class__.__mro__):
+            for attr_name, attr_value in cls.__dict__.items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr_value, ManyToOne):
+                    # Remove self from parent's reverse index
+                    parent_ref = self.__dict__.get(f"_rel_{attr_name}")
+                    if parent_ref is not None:
+                        for type_name in attr_value._get_allowed_types():
+                            entity_class = db._entity_types.get(type_name)
+                            if entity_class and db.load(type_name, parent_ref):
+                                db.reverse_index_remove(
+                                    type_name,
+                                    parent_ref,
+                                    attr_value.reverse_name,
+                                    self._id,
+                                )
+                                break
+                elif isinstance(attr_value, OneToOne):
+                    # Remove self from target's reverse index
+                    target_ref = self.__dict__.get(f"_rel_{attr_name}")
+                    if target_ref is not None:
+                        for type_name in attr_value._get_allowed_types():
+                            entity_class = db._entity_types.get(type_name)
+                            if entity_class and db.load(type_name, target_ref):
+                                db.reverse_index_remove(
+                                    type_name,
+                                    target_ref,
+                                    attr_value.reverse_name,
+                                    self._id,
+                                )
+                                break
+                    # Also delete any reverse index where self is parent (inverse side)
+                    db.reverse_index_delete(self._type, self._id, attr_name)
+                elif isinstance(attr_value, OneToMany):
+                    # Delete the reverse index entry for this parent
+                    db.reverse_index_delete(self._type, self._id, attr_name)
+                elif isinstance(attr_value, ManyToMany):
+                    # Remove self from each related entity's reverse index
+                    related_ids = db.reverse_index_get(self._type, self._id, attr_name)
+                    for related_id in related_ids:
+                        for type_name in attr_value._get_allowed_types():
+                            entity_class = db._entity_types.get(type_name)
+                            if entity_class and db.load(type_name, related_id):
+                                db.reverse_index_remove(
+                                    type_name,
+                                    related_id,
+                                    attr_value.reverse_name,
+                                    self._id,
+                                )
+                                break
+                    # Delete own index
+                    db.reverse_index_delete(self._type, self._id, attr_name)
+
+        db.delete(self._type, self._id)
 
         # Remove from entity registry
-        self.db().unregister_entity(self._type, self._id)
+        db.unregister_entity(self._type, self._id)
 
         # Decrement the count when an entity is deleted
         type_name = self.__class__.get_full_type_name()
         count_key = f"{type_name}_count"
-        current_count = int(self.db().load("_system", count_key) or 0)
+        current_count = int(db.load("_system", count_key) or 0)
         if current_count > 0:
-            self.db().save("_system", count_key, str(current_count - 1))
+            db.save("_system", count_key, str(current_count - 1))
         else:
             raise ValueError(
                 f"Entity count for {type_name} is already zero; cannot decrement further."
@@ -605,7 +660,7 @@ class Entity:
             if hasattr(self, alias_field):
                 alias_value = getattr(self, alias_field)
                 if alias_value is not None:
-                    self.db().delete(self._alias_key(), alias_value)
+                    db.delete(self._alias_key(), alias_value)
 
         logger.debug(f"Deleted entity {self._type}@{self._id}")
 
@@ -651,61 +706,73 @@ class Entity:
         return entity._id
 
     def _serialize_full(self) -> Dict[str, Any]:
-        """Full serialization including all relations. Used by _save() for persistence."""
+        """Full serialization including relation FK references. Used by _save()."""
         data = self._serialize_base()
 
-        from ic_python_db.properties import ManyToMany, OneToMany
+        from ic_python_db.properties import ManyToOne, OneToOne
 
-        for rel_name, rel_entities in self._relations.items():
-            if rel_entities:
-                rel_prop = getattr(self.__class__, rel_name, None)
-                is_to_many = isinstance(rel_prop, (OneToMany, ManyToMany))
-
-                if len(rel_entities) == 1 and not is_to_many:
-                    data[rel_name] = self._get_entity_reference(rel_entities[0])
-                else:
-                    data[rel_name] = [
-                        self._get_entity_reference(e) for e in rel_entities
-                    ]
+        for cls in reversed(self.__class__.__mro__):
+            for attr_name, attr_value in cls.__dict__.items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr_value, (ManyToOne, OneToOne)):
+                    ref = self.__dict__.get(f"_rel_{attr_name}")
+                    if ref is not None:
+                        data[attr_name] = ref
 
         return data
+
+    def _resolve_ref_with_alias(self, entity_id: str, allowed_types: list) -> str:
+        """Resolve an entity ID to its best reference (alias value or ID)."""
+        db = self.db()
+        for type_name in allowed_types:
+            entity_class = db._entity_types.get(type_name)
+            if entity_class:
+                entity = entity_class.load(entity_id)
+                if entity:
+                    return self._get_entity_reference(entity)
+        return entity_id
 
     def serialize(self) -> Dict[str, Any]:
         """Convert the entity to a portable serializable dictionary.
 
-        OneToMany relations are skipped (reconstructed from reverse ManyToOne).
-        For bilateral OneToOne relations, only the alphabetically-earlier entity
-        type serializes the reference, avoiding circular dependencies.
+        Includes: ManyToOne FK, owning-side OneToOne FK, ManyToMany entries.
+        Excludes: OneToMany (reconstructed from ManyToOne during import).
 
         Returns:
             Dict containing the entity's serializable data
         """
         data = self._serialize_base()
 
-        from ic_python_db.properties import ManyToMany, OneToMany, OneToOne
+        from ic_python_db.properties import ManyToMany, ManyToOne, OneToOne
 
-        for rel_name, rel_entities in self._relations.items():
-            if rel_entities:
-                rel_prop = getattr(self.__class__, rel_name, None)
+        db = self.db()
 
-                # Skip OneToMany — always reconstructed from reverse ManyToOne
-                if isinstance(rel_prop, OneToMany):
+        for cls in reversed(self.__class__.__mro__):
+            for attr_name, attr_value in cls.__dict__.items():
+                if attr_name.startswith("_"):
                     continue
-                # For OneToOne bilateral, only serialize on one deterministic side:
-                # the entity whose type name is alphabetically <= the target type.
-                if isinstance(rel_prop, OneToOne):
-                    target_type = rel_entities[0]._type if rel_entities else None
-                    if target_type and self._type > target_type:
-                        continue
-
-                is_to_many = isinstance(rel_prop, (OneToMany, ManyToMany))
-
-                if len(rel_entities) == 1 and not is_to_many:
-                    data[rel_name] = self._get_entity_reference(rel_entities[0])
-                else:
-                    data[rel_name] = [
-                        self._get_entity_reference(e) for e in rel_entities
-                    ]
+                if isinstance(attr_value, ManyToOne):
+                    ref = self.__dict__.get(f"_rel_{attr_name}")
+                    if ref is not None:
+                        data[attr_name] = self._resolve_ref_with_alias(
+                            ref, attr_value._get_allowed_types()
+                        )
+                elif isinstance(attr_value, OneToOne):
+                    ref = self.__dict__.get(f"_rel_{attr_name}")
+                    if ref is not None:
+                        data[attr_name] = self._resolve_ref_with_alias(
+                            ref, attr_value._get_allowed_types()
+                        )
+                elif isinstance(attr_value, ManyToMany):
+                    related_ids = db.reverse_index_get(self._type, self._id, attr_name)
+                    if related_ids:
+                        data[attr_name] = [
+                            self._resolve_ref_with_alias(
+                                rid, attr_value._get_allowed_types()
+                            )
+                            for rid in related_ids
+                        ]
 
         return data
 
@@ -970,70 +1037,3 @@ class Entity:
             Hash value
         """
         return hash((self._type, self._id))
-
-    def add_relation(self, from_rel: str, to_rel: str, other: "Entity") -> None:
-        """Add a bidirectional relationship with another entity.
-
-        Args:
-            from_rel: Name of relation from this entity to other
-            to_rel: Name of relation from other entity to this
-            other: Entity to create relationship with
-        """
-        # Add forward relation
-        if from_rel not in self._relations:
-            self._relations[from_rel] = []
-        if other not in self._relations[from_rel]:
-            self._relations[from_rel].append(other)
-
-        # Add reverse relation
-        if to_rel not in other._relations:
-            other._relations[to_rel] = []
-        if self not in other._relations[to_rel]:
-            other._relations[to_rel].append(self)
-
-        # Save both entities
-        self._save()
-        other._save()
-
-    def get_relations(
-        self, relation_name: str, entity_type: str = None
-    ) -> List["Entity"]:
-        """Get all related entities for a relation, optionally filtered by type.
-
-        Args:
-            relation_name: Name of the relation to follow
-            entity_type: Optional type name to filter entities by
-
-        Returns:
-            List of related entities
-        """
-        if relation_name not in self._relations:
-            return []
-
-        entities = self._relations[relation_name]
-        if entity_type:
-            entities = [e for e in entities if e._type == entity_type]
-
-        return entities
-
-    def remove_relation(self, from_rel: str, to_rel: str, other: "Entity") -> None:
-        """Remove a bidirectional relationship with another entity.
-
-        Args:
-            from_rel: Name of relation from this entity to other
-            to_rel: Name of relation from other entity to this
-            other: Entity to remove relationship with
-        """
-        # Remove forward relation
-        if from_rel in self._relations:
-            if other in self._relations[from_rel]:
-                self._relations[from_rel].remove(other)
-
-        # Remove reverse relation
-        if to_rel in other._relations:
-            if self in other._relations[to_rel]:
-                other._relations[to_rel].remove(self)
-
-        # Save both entities
-        self._save()
-        other._save()

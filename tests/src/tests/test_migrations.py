@@ -476,7 +476,6 @@ class TestMigrations:
         profile = Profile(bio="Developer")
         user = User(name="Alice", profile=profile)
         user_id = user._id
-        profile_id = profile._id
 
         Database.get_instance().clear_registry()
 

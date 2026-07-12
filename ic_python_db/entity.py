@@ -674,10 +674,7 @@ class Entity:
                 for attr_name, attr_value in cls.__dict__.items():
                     if attr_name.startswith("_"):
                         continue
-                    if (
-                        isinstance(attr_value, ManyToMany)
-                        and attr_value.unidirectional
-                    ):
+                    if isinstance(attr_value, ManyToMany) and attr_value.unidirectional:
                         my_short = (
                             self._type.split("::")[-1]
                             if "::" in self._type

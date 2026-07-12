@@ -513,6 +513,20 @@ class Entity:
         count = db.load("_system", count_key)
         return int(count) if count else 0
 
+    def reverse_count(self, relation_name: str) -> int:
+        """Number of entities referencing this one via a unidirectional
+        ManyToMany relation.
+
+        ``relation_name`` is the ``reverse_name`` declared on the owning
+        side, e.g. with ``User.profiles = ManyToMany('UserProfile', 'users',
+        unidirectional=True)`` a profile's holder count is
+        ``profile.reverse_count('users')``.
+
+        Falls back to the legacy bidirectional index length when the
+        relation was converted and no write has migrated the counter yet.
+        """
+        return self.db().reverse_count_get(self._type, self._id, relation_name)
+
     @classmethod
     def max_id(cls: Type[T]) -> int:
         """Get the maximum ID assigned to entities of this type.
@@ -623,20 +637,60 @@ class Entity:
                     db.reverse_index_delete(self._type, self._id, attr_name)
                 elif isinstance(attr_value, ManyToMany):
                     # Remove self from each related entity's reverse index
+                    # (or decrement its counter for unidirectional relations)
                     related_ids = db.reverse_index_get(self._type, self._id, attr_name)
                     for related_id in related_ids:
                         for type_name in attr_value._get_allowed_types():
                             entity_class = db._entity_types.get(type_name)
                             if entity_class and db.load(type_name, related_id):
-                                db.reverse_index_remove(
-                                    type_name,
-                                    related_id,
-                                    attr_value.reverse_name,
-                                    self._id,
-                                )
+                                if attr_value.unidirectional:
+                                    db.reverse_count_add(
+                                        type_name,
+                                        related_id,
+                                        attr_value.reverse_name,
+                                        -1,
+                                    )
+                                else:
+                                    db.reverse_index_remove(
+                                        type_name,
+                                        related_id,
+                                        attr_value.reverse_name,
+                                        self._id,
+                                    )
                                 break
                     # Delete own index
                     db.reverse_index_delete(self._type, self._id, attr_name)
+
+        # Clean up reverse counters other entity types keep on *this* entity
+        # via unidirectional ManyToMany relations targeting our type. Their
+        # forward indexes may retain a dangling ID (skipped on load); the
+        # counter itself must not outlive us.
+        seen_classes = set()
+        for entity_class in db._entity_types.values():
+            if entity_class in seen_classes or not isinstance(entity_class, type):
+                continue
+            seen_classes.add(entity_class)
+            for cls in reversed(entity_class.__mro__):
+                for attr_name, attr_value in cls.__dict__.items():
+                    if attr_name.startswith("_"):
+                        continue
+                    if (
+                        isinstance(attr_value, ManyToMany)
+                        and attr_value.unidirectional
+                    ):
+                        my_short = (
+                            self._type.split("::")[-1]
+                            if "::" in self._type
+                            else self._type
+                        )
+                        targets = [
+                            t.split("::")[-1] if "::" in t else t
+                            for t in attr_value._get_allowed_types()
+                        ]
+                        if my_short in targets:
+                            db.reverse_count_delete(
+                                self._type, self._id, attr_value.reverse_name
+                            )
 
         db.delete(self._type, self._id)
 

@@ -73,6 +73,8 @@ def build_field_descriptor(prop) -> Dict[str, Any]:
         if prop.reverse_name:
             desc["inverse"] = prop.reverse_name
         desc["many"] = prop.many
+        if isinstance(prop, ManyToMany) and prop.unidirectional:
+            desc["unidirectional"] = True
         return desc
 
     desc["kind"] = "property"

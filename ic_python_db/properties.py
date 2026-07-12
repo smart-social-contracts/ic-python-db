@@ -556,9 +556,17 @@ class ManyToManyList(list):
             db.reverse_index_add(
                 self._owner._type, self._owner._id, self._prop.name, resolved._id
             )
-            db.reverse_index_add(
-                resolved._type, resolved._id, self._prop.reverse_name, self._owner._id
-            )
+            if self._prop.unidirectional:
+                db.reverse_count_add(
+                    resolved._type, resolved._id, self._prop.reverse_name, 1
+                )
+            else:
+                db.reverse_index_add(
+                    resolved._type,
+                    resolved._id,
+                    self._prop.reverse_name,
+                    self._owner._id,
+                )
             if not self._owner._do_not_save:
                 self._owner._save()
         self.append(resolved)
@@ -576,10 +584,24 @@ class ManyToManyList(list):
             entity_type = None
 
         db = Database.get_instance()
+        was_present = entity_id in db.reverse_index_get(
+            self._owner._type, self._owner._id, self._prop.name
+        )
         db.reverse_index_remove(
             self._owner._type, self._owner._id, self._prop.name, entity_id
         )
-        if entity_type:
+        if self._prop.unidirectional:
+            if was_present:
+                if entity_type is None:
+                    for type_name in self._prop._get_allowed_types():
+                        if db.load(type_name, entity_id):
+                            entity_type = type_name
+                            break
+                if entity_type:
+                    db.reverse_count_add(
+                        entity_type, entity_id, self._prop.reverse_name, -1
+                    )
+        elif entity_type:
             db.reverse_index_remove(
                 entity_type, entity_id, self._prop.reverse_name, self._owner._id
             )
@@ -609,10 +631,32 @@ class ManyToMany(Relation[E]):
 
         class Course(Entity):
             students = ManyToMany('Student', 'courses')
+
+    Unidirectional mode (``unidirectional=True``) is for relations whose
+    reverse side would fan out to huge cardinalities (e.g. a profile shared
+    by 100k users). Declare it on the owning (small) side only — the target
+    entity declares nothing. The owning side keeps its normal index, while
+    the target side maintains only an O(1) counter instead of an ID array
+    that would be rewritten on every add/remove:
+
+        class User(Entity):
+            profiles = ManyToMany('UserProfile', 'users', unidirectional=True)
+
+        profile.reverse_count('users')   # number of users holding it
+
+    The counter lazily migrates from a legacy bidirectional index on first
+    write (the old ID array is dropped). Reverse *listing* is intentionally
+    unsupported — scan the owning entities instead.
     """
 
-    def __init__(self, entity_types: Union[str, List[str]], reverse_name: str):
+    def __init__(
+        self,
+        entity_types: Union[str, List[str]],
+        reverse_name: str,
+        unidirectional: bool = False,
+    ):
         super().__init__(entity_types, reverse_name)
+        self.unidirectional = unidirectional
 
     def __get__(
         self, obj: object, objtype: Optional[type] = None
@@ -664,15 +708,28 @@ class ManyToMany(Relation[E]):
             for type_name in self._get_allowed_types():
                 entity_class = db._entity_types.get(type_name)
                 if entity_class and db.load(type_name, old_id):
-                    db.reverse_index_remove(
-                        type_name, old_id, self.reverse_name, obj._id
-                    )
+                    if self.unidirectional:
+                        db.reverse_count_add(type_name, old_id, self.reverse_name, -1)
+                    else:
+                        db.reverse_index_remove(
+                            type_name, old_id, self.reverse_name, obj._id
+                        )
                     break
 
-        # Add new relations to both sides' indexes
+        # Add new relations to both sides' indexes (dedupe: the forward index
+        # ignores repeats, so the reverse side must too)
+        seen_ids = set()
         for entity in resolved:
+            if entity._id in seen_ids:
+                continue
+            seen_ids.add(entity._id)
             db.reverse_index_add(obj._type, obj._id, self.name, entity._id)
-            db.reverse_index_add(entity._type, entity._id, self.reverse_name, obj._id)
+            if self.unidirectional:
+                db.reverse_count_add(entity._type, entity._id, self.reverse_name, 1)
+            else:
+                db.reverse_index_add(
+                    entity._type, entity._id, self.reverse_name, obj._id
+                )
 
         if not obj._do_not_save:
             obj._save()

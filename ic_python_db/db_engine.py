@@ -426,6 +426,68 @@ class Database:
         if self._db_storage.get(key) is not None:
             self._db_storage.remove(key)
 
+    # Reverse counters (unidirectional relations)
+    # Key format: "_rc:{parent_type}:{parent_id}:{relation_name}"
+    # Value: integer count of related entities.
+    #
+    # Used by unidirectional ManyToMany relations: the owning side keeps its
+    # normal (small) index while the target side maintains only an O(1)
+    # counter instead of an ID array that would grow with every relation
+    # (e.g. a UserProfile referenced by 100k users).
+
+    def _rc_key(self, parent_type: str, parent_id: str, relation_name: str) -> str:
+        return f"_rc:{parent_type}:{parent_id}:{relation_name}"
+
+    def reverse_count_get(
+        self, parent_type: str, parent_id: str, relation_name: str
+    ) -> int:
+        """Read the reverse counter for a parent entity's relation.
+
+        Falls back to the length of a legacy reverse-index array (from when
+        the relation was bidirectional) if no counter exists yet.
+        """
+        key = self._rc_key(parent_type, parent_id, relation_name)
+        raw = self._db_storage.get(key)
+        if raw is not None:
+            return int(raw)
+        legacy = self._db_storage.get(
+            self._ri_key(parent_type, parent_id, relation_name)
+        )
+        if legacy:
+            return len(json.loads(legacy))
+        return 0
+
+    def reverse_count_add(
+        self, parent_type: str, parent_id: str, relation_name: str, delta: int
+    ) -> None:
+        """Adjust the reverse counter by delta (never below zero).
+
+        On first write, seeds the counter from a legacy reverse-index array
+        (if present) and drops the array — lazy, exactly-once migration of
+        relations converted from bidirectional to unidirectional.
+        """
+        key = self._rc_key(parent_type, parent_id, relation_name)
+        raw = self._db_storage.get(key)
+        if raw is not None:
+            current = int(raw)
+        else:
+            legacy_key = self._ri_key(parent_type, parent_id, relation_name)
+            legacy = self._db_storage.get(legacy_key)
+            if legacy:
+                current = len(json.loads(legacy))
+                self._db_storage.remove(legacy_key)
+            else:
+                current = 0
+        self._db_storage.insert(key, str(max(0, current + delta)))
+
+    def reverse_count_delete(
+        self, parent_type: str, parent_id: str, relation_name: str
+    ) -> None:
+        """Delete a reverse counter entry (used when the parent is deleted)."""
+        key = self._rc_key(parent_type, parent_id, relation_name)
+        if self._db_storage.get(key) is not None:
+            self._db_storage.remove(key)
+
     def get_audit(
         self, id_from: Optional[int] = None, id_to: Optional[int] = None
     ) -> Dict[str, str]:

@@ -187,6 +187,166 @@ class TestRelationships:
             assert student1 in course.students
 
 
+class Holder(Entity):
+    """Owning side of a unidirectional many-to-many (small forward set)."""
+
+    name = String()
+    badges = ManyToMany(["Badge"], "holders", unidirectional=True)
+
+
+class Badge(Entity):
+    """Target of a unidirectional many-to-many.
+
+    Declares nothing — the reverse side only has an O(1) counter,
+    read via badge.reverse_count('holders').
+    """
+
+    name = String()
+
+
+class TestUnidirectionalManyToMany:
+    """Tests for ManyToMany(unidirectional=True): forward index + reverse counter."""
+
+    def setUp(self):
+        Database.get_instance().clear()
+
+    def test_add_and_remove_updates_counter(self):
+        h1 = Holder(name="alice")
+        h2 = Holder(name="bob")
+        badge = Badge(name="gold")
+
+        assert badge.reverse_count("holders") == 0
+
+        h1.badges.add(badge)
+        h2.badges.add(badge)
+
+        # Forward traversal works as usual
+        assert len(h1.badges) == 1
+        assert h1.badges[0].name == "gold"
+        # Reverse side is a counter, not a list
+        assert badge.reverse_count("holders") == 2
+
+        h1.badges.remove(badge)
+        assert badge.reverse_count("holders") == 1
+        assert len(h1.badges) == 0
+
+    def test_add_is_idempotent_on_counter(self):
+        h = Holder(name="alice")
+        badge = Badge(name="gold")
+
+        h.badges.add(badge)
+        h.badges.add(badge)  # duplicate add must not double-count
+
+        assert badge.reverse_count("holders") == 1
+
+    def test_discard_absent_does_not_decrement(self):
+        h = Holder(name="alice")
+        badge = Badge(name="gold")
+
+        h.badges.discard(badge)  # never added
+        assert badge.reverse_count("holders") == 0
+
+    def test_assignment_reconciles_counters(self):
+        h = Holder(name="alice")
+        b1 = Badge(name="gold")
+        b2 = Badge(name="silver")
+
+        h.badges = [b1, b2]
+        assert b1.reverse_count("holders") == 1
+        assert b2.reverse_count("holders") == 1
+
+        # Reassign: b1 dropped, b2 kept
+        h.badges = [b2]
+        assert b1.reverse_count("holders") == 0
+        assert b2.reverse_count("holders") == 1
+
+    def test_assignment_deduplicates(self):
+        h = Holder(name="alice")
+        badge = Badge(name="gold")
+
+        h.badges = [badge, badge]
+        assert badge.reverse_count("holders") == 1
+
+    def test_constructor_assignment_counts(self):
+        badge = Badge(name="gold")
+        Holder(name="alice", badges=[badge])
+        Holder(name="bob", badges=[badge])
+
+        assert badge.reverse_count("holders") == 2
+
+    def test_owner_delete_decrements_counter(self):
+        h1 = Holder(name="alice")
+        h2 = Holder(name="bob")
+        badge = Badge(name="gold")
+        h1.badges.add(badge)
+        h2.badges.add(badge)
+
+        h1.delete()
+        assert badge.reverse_count("holders") == 1
+
+    def test_target_delete_removes_counter_and_forward_skips(self):
+        h = Holder(name="alice")
+        badge = Badge(name="gold")
+        h.badges.add(badge)
+
+        badge.delete()
+
+        # Counter must not outlive the target entity
+        db = Database.get_instance()
+        assert db.reverse_count_get(badge._type, badge._id, "holders") == 0
+        # Forward traversal skips the dangling reference
+        assert len(h.badges) == 0
+
+    def test_counter_survives_reload(self):
+        h = Holder(name="alice")
+        badge = Badge(name="gold")
+        h.badges.add(badge)
+        badge_id = badge._id
+
+        # Simulate canister upgrade: clear in-memory state
+        Database.get_instance()._entity_registry.clear()
+        Entity._context.clear()
+
+        loaded = Badge.load(str(badge_id))
+        assert loaded.reverse_count("holders") == 1
+
+    def test_legacy_reverse_index_migration(self):
+        """A relation converted from bidirectional keeps its legacy _ri array;
+        reads fall back to its length and the first write migrates it to a
+        counter and drops the array."""
+        h1 = Holder(name="alice")
+        h2 = Holder(name="bob")
+        badge = Badge(name="gold")
+
+        db = Database.get_instance()
+        # Simulate leftover bidirectional reverse index from before conversion
+        db.reverse_index_add(badge._type, badge._id, "holders", h1._id)
+        db.reverse_index_add(badge._type, badge._id, "holders", h2._id)
+
+        # Read falls back to legacy array length
+        assert badge.reverse_count("holders") == 2
+
+        # First write seeds the counter from the array and drops it
+        db.reverse_count_add(badge._type, badge._id, "holders", 1)
+        assert db.reverse_index_get(badge._type, badge._id, "holders") == []
+        assert badge.reverse_count("holders") == 3
+
+    def test_counter_never_negative(self):
+        badge = Badge(name="gold")
+        db = Database.get_instance()
+        db.reverse_count_add(badge._type, badge._id, "holders", -5)
+        assert badge.reverse_count("holders") == 0
+
+    def test_schema_marks_unidirectional(self):
+        from ic_python_db.schema import build_schema
+
+        db = Database.get_instance()
+        schema = build_schema(db._entity_types)
+        holder_key = next(k for k in schema if k.endswith("Holder"))
+        rel = schema[holder_key]["relationships"]["badges"]
+        assert rel.get("unidirectional") is True
+
+
 class BaseParent(Entity):
     """Base entity with a OneToMany relationship."""
 
@@ -447,7 +607,9 @@ def run(test_name: str = None, test_var: str = None):
     results3 = tester3.run_tests()
     tester4 = Tester(TestReverseIndexResolution)
     results4 = tester4.run_tests()
-    return results or results2 or results3 or results4
+    tester5 = Tester(TestUnidirectionalManyToMany)
+    results5 = tester5.run_tests()
+    return results or results2 or results3 or results4 or results5
 
 
 if __name__ == "__main__":

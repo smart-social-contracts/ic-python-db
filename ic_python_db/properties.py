@@ -30,12 +30,18 @@ class Property(Generic[T]):
     """Definition of an entity property.
 
     A generic descriptor class that provides type-safe property access.
+
+    With ``indexed=True`` a persistent secondary index (issue #11) maps each
+    distinct value to the list of entity IDs holding it, enabling equality
+    lookups via ``Entity.find_by`` without scanning all entities. ``None``
+    values are not indexed.
     """
 
     name: str
     type: Type[T]
     default: Optional[T]
     validator: Optional[Callable[[T], bool]]
+    indexed: bool
 
     def __init__(
         self,
@@ -43,11 +49,13 @@ class Property(Generic[T]):
         type: Type[T] = type(None),  # type: ignore[assignment]
         default: Optional[T] = None,
         validator: Optional[Callable[[T], bool]] = None,
+        indexed: bool = False,
     ):
         self.name = name
         self.type = type
         self.default = default
         self.validator = validator
+        self.indexed = indexed
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
@@ -62,6 +70,11 @@ class Property(Generic[T]):
     def __set__(self, obj, value):
         from .constants import ACTION_CREATE, ACTION_MODIFY
         from .hooks import call_entity_hook
+
+        # Fast path: hydrating from DB — store raw value, indexes are intact.
+        if getattr(obj, "_hydrating", False):
+            obj.__dict__[f"_{PROPERTY_STORAGE_PREFIX}_{self.name}"] = value
+            return
 
         old_value = obj.__dict__.get(
             f"_{PROPERTY_STORAGE_PREFIX}_{self.name}", self.default
@@ -100,6 +113,14 @@ class Property(Generic[T]):
                 raise ValueError(f"Invalid value for {self.name}: {value}")
 
         obj.__dict__[f"_{PROPERTY_STORAGE_PREFIX}_{self.name}"] = value
+
+        if self.indexed and old_value != value and obj._id is not None:
+            db = obj.db()
+            if old_value is not None:
+                db.field_index_remove(obj._type, self.name, str(old_value), obj._id)
+            if value is not None:
+                db.field_index_add(obj._type, self.name, str(value), obj._id)
+
         obj._save()
 
 
@@ -111,6 +132,7 @@ class String(Property[str]):
         min_length: Optional[int] = None,
         max_length: Optional[int] = None,
         default: Optional[str] = None,
+        indexed: bool = False,
     ):
         def validator(value: str) -> bool:
             if min_length is not None and len(value) < min_length:
@@ -119,7 +141,9 @@ class String(Property[str]):
                 return False
             return True
 
-        super().__init__(name="", type=str, default=default, validator=validator)
+        super().__init__(
+            name="", type=str, default=default, validator=validator, indexed=indexed
+        )
 
 
 class Integer(Property[int]):
@@ -130,6 +154,7 @@ class Integer(Property[int]):
         min_value: Optional[int] = None,
         max_value: Optional[int] = None,
         default: Optional[int] = None,
+        indexed: bool = False,
     ):
         def validator(value: int) -> bool:
             if min_value is not None and value < min_value:
@@ -138,7 +163,9 @@ class Integer(Property[int]):
                 return False
             return True
 
-        super().__init__(name="", type=int, default=default, validator=validator)
+        super().__init__(
+            name="", type=int, default=default, validator=validator, indexed=indexed
+        )
 
 
 class Float(Property[float]):
@@ -149,6 +176,7 @@ class Float(Property[float]):
         min_value: Optional[float] = None,
         max_value: Optional[float] = None,
         default: Optional[float] = None,
+        indexed: bool = False,
     ):
         def validator(value: float) -> bool:
             if min_value is not None and value < min_value:
@@ -157,14 +185,16 @@ class Float(Property[float]):
                 return False
             return True
 
-        super().__init__(name="", type=float, default=default, validator=validator)
+        super().__init__(
+            name="", type=float, default=default, validator=validator, indexed=indexed
+        )
 
 
 class Boolean(Property[bool]):
     """Boolean property."""
 
-    def __init__(self, default: Optional[bool] = None):
-        super().__init__(name="", type=bool, default=default)
+    def __init__(self, default: Optional[bool] = None, indexed: bool = False):
+        super().__init__(name="", type=bool, default=default, indexed=indexed)
 
 
 # ── Relation Properties ───────────────────────────────────────────────────────

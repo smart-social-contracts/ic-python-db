@@ -9,6 +9,7 @@ from tests import (
     test_entity,
     test_example_1,
     test_example_2,
+    test_indexed_fields,
     test_mixins,
     test_namespaces,
     test_properties,

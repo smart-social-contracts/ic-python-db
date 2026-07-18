@@ -145,6 +145,42 @@ Then use the defined entities to store objects:
 
 For more usage examples, see the [tests](tests/src/tests).
 
+## Indexed Fields
+
+Declare `indexed=True` on a scalar property to maintain a persistent secondary index, enabling equality lookups without scanning all entities:
+
+```python
+class Proposal(Entity):
+    title = String()
+    status = String(max_length=32, indexed=True)
+    org_scope = String(max_length=128, indexed=True)
+
+Proposal(title="A", status="voting", org_scope="Justice")
+Proposal(title="B", status="executed", org_scope="Justice")
+
+# Paginated equality lookup — cost proportional to matches, not max_id
+entities, next_from_id = Proposal.find_by("status", "voting", from_id=1, count=50)
+
+# Count without loading entities
+Proposal.count_by("org_scope", "Justice")  # 2
+```
+
+The index is maintained automatically on create, update, and delete. `None` values are not indexed. Querying a field that is not declared `indexed=True` raises `ValueError`.
+
+### Backfilling existing data
+
+Entities created before a field became indexed are missing from its index. Rebuild in bounded batches (resumable, safe for IC instruction limits — spread calls across multiple update calls or timers):
+
+```python
+cursor = 1
+while cursor is not None:
+    cursor = Proposal.rebuild_field_index("status", from_id=cursor, batch=200)
+```
+
+The rebuild is idempotent. The `indexed` flag is not part of the schema descriptor, so toggling it never triggers upgrade-compatibility errors.
+
+Note: each distinct value's ID list is stored in a single storage entry, so extremely hot values are bounded by the backing store's `max_value_size` — the same constraint as relationship reverse indexes.
+
 ## Namespaces
 
 Organize entities with the `__namespace__` attribute to avoid type conflicts when you have the same class name in different modules:

@@ -20,7 +20,7 @@ if [ ! -f "$TEMPLATE_PATH" ]; then
 fi
 
 # Define a list of test identifiers
-TEST_IDS=('example_1' 'example_2' 'entity' 'mixins' 'properties' 'alias_and_properties' 'relationships' 'enhanced_relations' 'serialization' 'database' 'audit' 'namespaces')
+TEST_IDS=('example_1' 'example_2' 'entity' 'mixins' 'properties' 'alias_and_properties' 'relationships' 'enhanced_relations' 'serialization' 'database' 'audit' 'namespaces' 'indexed_fields')
 
 if [ $# -gt 0 ]; then
   TEST_IDS=("$@")

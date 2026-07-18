@@ -1,6 +1,6 @@
 """Enhanced entity implementation with support for mixins and entity types."""
 
-from typing import Any, Dict, List, Optional, Set, Type, TypeVar
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, TypeVar
 
 from ic_python_logging import get_logger
 
@@ -198,11 +198,17 @@ class Entity:
         self.db().register_entity(self)
 
         self._do_not_save = True
+        # True only while reconstructing persisted state in this constructor:
+        # property descriptors skip hooks, validation, and index maintenance
+        # (indexes are already intact). Explicit updates later — including
+        # deserialize() upserts — run the full descriptor path.
+        self._hydrating = self._loaded
         # Set additional attributes
         for k, v in kwargs.items():
             if not k.startswith("_"):
                 setattr(self, k, v)
         self._do_not_save = False
+        self._hydrating = False
 
         if not self._loaded:
             self._save()
@@ -455,6 +461,142 @@ class Entity:
         ]
 
     @classmethod
+    def _indexed_properties(cls) -> Dict[str, Any]:
+        """Return {name: Property} for all properties declared with indexed=True."""
+        from .properties import Property
+
+        result: Dict[str, Any] = {}
+        for klass in reversed(cls.__mro__):
+            for attr_name, attr_value in klass.__dict__.items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr_value, Property) and attr_value.indexed:
+                    result[attr_name] = attr_value
+        return result
+
+    @classmethod
+    def _require_indexed_field(cls, field: str) -> None:
+        if field not in cls._indexed_properties():
+            raise ValueError(
+                f"{cls.__name__}.{field} is not an indexed property "
+                f"(declare it with indexed=True)"
+            )
+
+    @classmethod
+    def find_by(
+        cls: Type[T],
+        field: str,
+        value: Any,
+        from_id: int = 1,
+        count: int = 50,
+    ) -> Tuple[List[T], Optional[int]]:
+        """Equality lookup on an indexed field with cursor pagination (issue #11).
+
+        IDs come from the persistent field index, so cost is proportional to
+        the number of matches, not to max_id. Results are ordered by ascending
+        entity ID, compatible with load_some-style cursors.
+
+        Args:
+            field: Name of a property declared with indexed=True
+            value: Value to match (compared via its string form, like the index)
+            from_id: Only return entities with _id >= from_id
+            count: Maximum number of entities to return
+
+        Returns:
+            (entities, next_from_id) — next_from_id is None when no more
+            matches remain, otherwise pass it back as from_id for the next page.
+
+        Raises:
+            ValueError: If the field is not declared with indexed=True
+        """
+        cls._require_indexed_field(field)
+        if from_id < 1:
+            raise ValueError("from_id must be at least 1")
+        if count < 1:
+            raise ValueError("count must be at least 1")
+
+        ids = cls.db().field_index_get(cls.get_full_type_name(), field, str(value))
+        matching = sorted((int(i) for i in ids if i.isdigit() and int(i) >= from_id))
+
+        entities: List[T] = []
+        last_id = None
+        for entity_id in matching:
+            if len(entities) >= count:
+                break
+            entity = cls.load(str(entity_id))
+            if entity is not None:
+                entities.append(entity)
+            last_id = entity_id
+
+        has_more = last_id is not None and any(i > last_id for i in matching)
+        next_from_id = (last_id + 1) if has_more else None
+        return entities, next_from_id
+
+    @classmethod
+    def count_by(cls: Type[T], field: str, value: Any) -> int:
+        """Number of entities whose indexed ``field`` equals ``value``.
+
+        Raises:
+            ValueError: If the field is not declared with indexed=True
+        """
+        cls._require_indexed_field(field)
+        return len(
+            cls.db().field_index_get(cls.get_full_type_name(), field, str(value))
+        )
+
+    @classmethod
+    def rebuild_field_index(
+        cls: Type[T],
+        field: str,
+        from_id: int = 1,
+        batch: int = 200,
+    ) -> Optional[int]:
+        """Index one batch of pre-existing entities; resumable (issue #11).
+
+        Entities created before a field was declared indexed=True are missing
+        from its index. This walks the ID range in bounded batches so callers
+        on the IC can spread the work across multiple update calls or timer
+        ticks without hitting per-message instruction limits:
+
+            cursor = 1
+            while cursor is not None:
+                cursor = Proposal.rebuild_field_index("org_scope", from_id=cursor)
+
+        Idempotent — re-indexing an already-indexed entity is a no-op.
+
+        Returns:
+            The from_id for the next batch, or None when the rebuild is done.
+
+        Raises:
+            ValueError: If the field is not declared with indexed=True
+        """
+        cls._require_indexed_field(field)
+        if from_id < 1:
+            raise ValueError("from_id must be at least 1")
+        if batch < 1:
+            raise ValueError("batch must be at least 1")
+
+        max_id = cls.max_id()
+        if max_id == 0 or from_id > max_id:
+            return None
+
+        db = cls.db()
+        type_name = cls.get_full_type_name()
+        end = min(from_id + batch - 1, max_id)
+        for entity_id in range(from_id, end + 1):
+            try:
+                entity = cls.load(str(entity_id))
+            except (ValueError, AttributeError):
+                continue
+            if entity is None:
+                continue
+            value = getattr(entity, field, None)
+            if value is not None:
+                db.field_index_add(type_name, field, str(value), entity._id)
+
+        return end + 1 if end < max_id else None
+
+    @classmethod
     def instances(cls: Type[T]) -> List[T]:
         """Get all instances of this entity type, including subclass instances.
 
@@ -688,6 +830,12 @@ class Entity:
                             db.reverse_count_delete(
                                 self._type, self._id, attr_value.reverse_name
                             )
+
+        # Remove from field indexes (issue #11)
+        for field_name in self._indexed_properties():
+            value = getattr(self, field_name, None)
+            if value is not None:
+                db.field_index_remove(self._type, field_name, str(value), self._id)
 
         db.delete(self._type, self._id)
 

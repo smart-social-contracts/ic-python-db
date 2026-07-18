@@ -426,6 +426,56 @@ class Database:
         if self._db_storage.get(key) is not None:
             self._db_storage.remove(key)
 
+    # ── Field Index API (issue #11) ────────────────────────────────────────────
+    #
+    # Secondary indexes for scalar properties declared with indexed=True.
+    # Allow equality lookups (Entity.find_by) without scanning all entities.
+    #
+    # Key format: _fi:{Type}:{field}:{value}
+    # Value: JSON array of entity IDs, e.g. ["1", "2", "3"]
+
+    def _fi_key(self, type_name: str, field_name: str, value: str) -> str:
+        return f"_fi:{type_name}:{field_name}:{value}"
+
+    def field_index_get(self, type_name: str, field_name: str, value: str) -> List[str]:
+        """Read the ID list for entities whose ``field_name`` equals ``value``.
+
+        Returns:
+            List of entity IDs, or empty list if no index entry exists.
+        """
+        key = self._fi_key(type_name, field_name, value)
+        raw = self._db_storage.get(key)
+        if raw:
+            return json.loads(raw)
+        return []
+
+    def field_index_add(
+        self, type_name: str, field_name: str, value: str, entity_id: str
+    ) -> None:
+        """Add an entity ID to the index entry for ``value``."""
+        key = self._fi_key(type_name, field_name, value)
+        raw = self._db_storage.get(key)
+        ids = json.loads(raw) if raw else []
+        if entity_id not in ids:
+            ids.append(entity_id)
+            self._db_storage.insert(key, json.dumps(ids))
+
+    def field_index_remove(
+        self, type_name: str, field_name: str, value: str, entity_id: str
+    ) -> None:
+        """Remove an entity ID from the index entry for ``value``."""
+        key = self._fi_key(type_name, field_name, value)
+        raw = self._db_storage.get(key)
+        if not raw:
+            return
+        ids = json.loads(raw)
+        if entity_id in ids:
+            ids.remove(entity_id)
+            if ids:
+                self._db_storage.insert(key, json.dumps(ids))
+            else:
+                self._db_storage.remove(key)
+
     # Reverse counters (unidirectional relations)
     # Key format: "_rc:{parent_type}:{parent_id}:{relation_name}"
     # Value: integer count of related entities.

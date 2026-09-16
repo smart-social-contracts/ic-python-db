@@ -93,6 +93,43 @@ class TestBenchmark:
         ic.print(f"BENCH_RESULT:load_level3:{count}:{cost}")
         return cost
 
+    def load_page_50(self, count: str):
+        """Measure cost of a cold load_some(1, 50) page at given DB size."""
+        self._clear()
+        count = int(count)
+        _seed_entities(count)
+        Database.get_instance().clear_registry()
+        cost, _ = _measure(lambda: BenchZone.load_some(1, 50))
+        ic.print(f"BENCH_RESULT:load_page_50:{count}:{cost}")
+        return cost
+
+    def instances_all(self, count: str):
+        """Measure cost of a cold instances() scan with every id present."""
+        self._clear()
+        count = int(count)
+        _seed_entities(count)
+        Database.get_instance().clear_registry()
+        cost, _ = _measure(lambda: BenchZone.instances())
+        ic.print(f"BENCH_RESULT:instances_all:{count}:{cost}")
+        return cost
+
+    def instances_sparse(self, count: str):
+        """Measure cost of a cold instances() scan after deleting every other zone.
+
+        With per-id probing every deleted id still costs a storage read; with a
+        range read deleted ids cost nothing.
+        """
+        self._clear()
+        count = int(count)
+        _seed_entities(count)
+        for zone in BenchZone.load_some(1, max(count, 1)):
+            if int(zone._id) % 2 == 0:
+                zone.delete()
+        Database.get_instance().clear_registry()
+        cost, _ = _measure(lambda: BenchZone.instances())
+        ic.print(f"BENCH_RESULT:instances_sparse:{count}:{cost}")
+        return cost
+
     def deserialize_new_level1(self, count: str):
         """Measure cost of deserialize (new entity) with level=1 at given DB size."""
         self._clear()

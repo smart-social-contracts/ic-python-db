@@ -176,8 +176,11 @@ class Entity:
             next_id = str(int(current_id) + 1)
             self._id = next_id
             db.save("_system", f"{type_name}_id", self._id)
-        else:
-            # Update max_id if custom ID is higher than current max
+        elif not self._loaded:
+            # Update max_id if custom ID is higher than current max.
+            # Skipped when hydrating persisted state: that id already went
+            # through this check when it was first created, so re-reading the
+            # counter would only add one storage read per loaded entity.
             db = self.db()
             type_name = self._type
             current_max_id = db.load("_system", f"{type_name}_id")
@@ -418,6 +421,16 @@ class Entity:
         if not data:
             return None
 
+        return cls._hydrate(entity_id, data)
+
+    @classmethod
+    def _hydrate(cls: Type[T], entity_id: str, data: dict) -> T:
+        """Build an instance from its persisted dict, migrating if needed.
+
+        Shared by ``load`` (single ``get``) and ``load_some`` (range page).
+        Callers must have checked the identity registry first.
+        """
+        type_name = cls.get_full_type_name()
         stored_version = data.get("__version__", 1)
         current_version = cls.__version__
 
@@ -582,19 +595,17 @@ class Entity:
 
         db = cls.db()
         type_name = cls.get_full_type_name()
-        end = min(from_id + batch - 1, max_id)
-        for entity_id in range(from_id, end + 1):
-            try:
-                entity = cls.load(str(entity_id))
-            except (ValueError, AttributeError):
-                continue
-            if entity is None:
-                continue
+        # One range read per batch of *live* entities (deleted ids cost nothing)
+        entities = cls.load_some(from_id, batch)
+        for entity in entities:
             value = getattr(entity, field, None)
             if value is not None:
                 db.field_index_add(type_name, field, str(value), entity._id)
 
-        return end + 1 if end < max_id else None
+        if len(entities) < batch:
+            return None
+        next_from_id = int(entities[-1]._id) + 1
+        return next_from_id if next_from_id <= max_id else None
 
     @classmethod
     def instances(cls: Type[T]) -> List[T]:
@@ -676,11 +687,7 @@ class Entity:
         Returns:
             int: Maximum entity ID
         """
-        type_name = cls.get_full_type_name()
-        db = cls.db()
-        max_id_key = f"{type_name}_id"
-        max_id = db.load("_system", max_id_key)
-        return int(max_id) if max_id else 0
+        return cls.db().max_id(cls.get_full_type_name())
 
     @classmethod
     def load_some(
@@ -698,29 +705,42 @@ class Entity:
             List[T]: List of entities for the requested page
 
         Raises:
-            ValueError: If page or page_size is less than 1
+            ValueError: If from_id or count is less than 1
+
+        Cost: with a range-capable storage backend (Basilisk's StableBTreeMap,
+        MemoryStorage) this is one ordered range read per page regardless of
+        how many ids in between were deleted; otherwise one read per id.
         """
-        logger.info(f"Loading entities from {from_id} to {from_id + count}")
+        logger.debug(f"Loading up to {count} entities from id {from_id}")
 
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
         if count < 1:
             raise ValueError("count must be at least 1")
 
-        # Return the slice of entities for the requested page
-        ret = []
+        db = cls.db()
+        type_name = cls.get_full_type_name()
 
-        while len(ret) < count and from_id <= cls.max_id():
-            logger.info(f"Loading entity {from_id}")
-            try:
-                entity = cls.load(str(from_id))
-                if entity:
+        ret: List[T] = []
+        max_id = db.max_id(type_name)
+        while len(ret) < count:
+            need = count - len(ret)
+            page = db.load_page(type_name, from_id, need, max_id=max_id)
+            for entity_id, data in page:
+                try:
+                    # Identity map first, so callers keep getting the same instance
+                    entity = db.get_entity(type_name, entity_id)
+                    if entity is None:
+                        entity = cls._hydrate(entity_id, data)
                     ret.append(entity)
-            except (ValueError, AttributeError) as e:
-                # Skip entities with broken/dangling relation references
-                # (full fix: issue #4 — lazy relation resolution)
-                logger.warning(f"Skipping {cls.__name__}@{from_id}: {e}")
-            from_id += 1
+                except (ValueError, AttributeError) as e:
+                    # Skip entities with broken/dangling relation references
+                    # (full fix: issue #4 — lazy relation resolution)
+                    logger.warning(f"Skipping {cls.__name__}@{entity_id}: {e}")
+            if len(page) < need:
+                break  # no more persisted entities of this type
+            # Page was full but something was skipped: continue after it
+            from_id = int(page[-1][0]) + 1
 
         return ret
 

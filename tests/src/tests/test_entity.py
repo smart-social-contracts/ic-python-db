@@ -362,6 +362,161 @@ class TestEntity:
         empty_page = Person.load_some(from_id=11, count=10)
         assert len(empty_page) == 0
 
+    def test_load_some_across_digit_buckets(self):
+        """Ids 1..150 span three key lengths ("T@9" < "T@10" < "T@100" on the
+        IC); pages must still come back in numeric order across those runs,
+        with deleted ids skipped and paging cursors continuing correctly."""
+        people = [Person(name=f"P{i}", age=i) for i in range(1, 151)]
+        for i in (9, 10, 11, 99, 100, 101, 150):
+            people[i - 1].delete()
+        db = Database.get_instance()
+
+        def ids(page):
+            return [int(p._id) for p in page]
+
+        # Cold: drop the identity map so entities really come from storage
+        db.clear_registry()
+        page = Person.load_some(from_id=1, count=20)
+        assert ids(page) == [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+        ]
+        assert page[8].name == "P12" and page[8].age == 12
+
+        db.clear_registry()
+        page = Person.load_some(from_id=95, count=10)
+        assert ids(page) == [95, 96, 97, 98, 102, 103, 104, 105, 106, 107]
+
+        # Walk everything with a cursor and compare with the full set
+        db.clear_registry()
+        seen = []
+        cursor = 1
+        while True:
+            page = Person.load_some(from_id=cursor, count=17)
+            seen.extend(ids(page))
+            if len(page) < 17:
+                break
+            cursor = int(page[-1]._id) + 1
+        expected = [i for i in range(1, 151) if i not in (9, 10, 11, 99, 100, 101, 150)]
+        assert seen == expected
+        assert Person.count() == len(expected)
+        assert len(Person.find({"age": 42})) == 1
+        assert Person.find({"age": 100}) == []
+
+    def test_load_some_ignores_custom_string_ids(self):
+        """Custom ids that sort inside a numeric run are not sequential ids
+        and must be skipped without ending the page early."""
+        for i in range(1, 6):
+            Person(name=f"Seq{i}")
+        # In the 2-char run, "1x" and "2-" both sort between "19" and "20"
+        # ('x' > '9', '-' < '0'); "abc" sorts after every numeric id.
+        Person(name="Custom1", _id="1x")
+        Person(name="Custom2", _id="2-")
+        Person(name="Custom3", _id="abc")
+        for i in range(6, 26):
+            Person(name=f"Seq{i}")
+
+        db = Database.get_instance()
+        db.clear_registry()
+        page = Person.load_some(from_id=1, count=100)
+        assert [p._id for p in page] == [str(i) for i in range(1, 26)]
+        assert Person["1x"].name == "Custom1"
+        assert Person["2-"].name == "Custom2"
+        assert Person["abc"].name == "Custom3"
+
+        # Pages whose range window contains the custom ids must still be
+        # filled up to `count` (custom ids end a raw page but not the result)
+        for from_id, count, expected in [
+            (18, 3, ["18", "19", "20"]),  # raw page ends on "1x"
+            (18, 4, ["18", "19", "20", "21"]),  # raw page ends on "2-"
+            (19, 2, ["19", "20"]),
+            (20, 2, ["20", "21"]),
+            (1, 3, ["1", "2", "3"]),
+        ]:
+            db.clear_registry()
+            page = Person.load_some(from_id=from_id, count=count)
+            assert [p._id for p in page] == expected, (
+                from_id,
+                count,
+                [p._id for p in page],
+            )
+
+    def test_load_some_falls_back_without_range(self):
+        """A storage backend with no range() (older CDK builds, simple test
+        doubles) must still work via key probing and give identical results."""
+        from ic_python_db.storage import Storage, supports_range
+
+        class ProbeOnlyStorage(Storage):
+            def __init__(self):
+                self._data = {}
+                self.gets = 0
+
+            def insert(self, key, value):
+                self._data[key] = value
+
+            def get(self, key):
+                self.gets += 1
+                return self._data.get(key)
+
+            def remove(self, key):
+                del self._data[key]
+
+            def items(self):
+                return iter(self._data.items())
+
+            def __contains__(self, key):
+                return key in self._data
+
+            def keys(self):
+                return iter(self._data.keys())
+
+        assert not supports_range(ProbeOnlyStorage())
+        db = Database.get_instance()
+        original = db._db_storage
+        probe = ProbeOnlyStorage()
+        # Mirror the current contents so both backends hold the same rows
+        for k, v in original.items():
+            probe.insert(k, v)
+        try:
+            db._db_storage = probe
+            for i in range(1, 31):
+                Person(name=f"P{i}")
+            for i in (3, 4, 20):
+                Person[str(i)].delete()
+            db.clear_registry()
+            page = Person.load_some(from_id=1, count=10)
+            assert [int(p._id) for p in page] == [1, 2, 5, 6, 7, 8, 9, 10, 11, 12]
+            assert Person.load_some(from_id=31, count=5) == []
+            assert len(Person.find({"name": "P25"})) == 1
+
+            # Same rows through the range path give the same answer
+            db._db_storage = original
+            for k, v in probe.items():
+                original.insert(k, v)
+            db.clear_registry()
+            page_range = Person.load_some(from_id=1, count=10)
+            assert [int(p._id) for p in page_range] == [1, 2, 5, 6, 7, 8, 9, 10, 11, 12]
+        finally:
+            db._db_storage = original
+
     def test_count_and_instances_method(self):
         """Test the count and instances method."""
         # Test count with no entities

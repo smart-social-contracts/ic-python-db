@@ -11,6 +11,7 @@ A lightweight key-value database with entity relationships and audit logging cap
 ## Features
 
 - **Persistent Storage**: Works with StableBTreeMap stable structure for persistent storage on your canister's stable memory so your data persists automatically across canister upgrades.
+- **Range-based paging**: `load_some`, `find`, `instances` and `rebuild_field_index` read a page of entities with a single ordered `range` call on the stable map (Basilisk `StableBTreeMap.range`), so cost tracks the rows returned rather than the highest id ever issued, and deleted ids are free. Backends without `range` (older CDK builds, plain dict test doubles) transparently fall back to one read per id.
 - **Entity-Relational Database**: Create, read and write entities with OneToOne, OneToMany, ManyToOne, and ManyToMany relationships.
 - **Schema Versioning & Upgrade Safety**: Automatic schema introspection, compatibility checking, and auto-migration for safe changes. Breaking changes without a `migrate()` method are rejected, preventing data corruption on canister upgrades.
 - **Entity Hooks**: Intercept and control entity lifecycle events (create, modify, delete) with `on_event` hooks.

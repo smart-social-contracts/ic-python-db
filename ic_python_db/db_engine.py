@@ -9,9 +9,40 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ic_python_logging import get_logger
 
-from .storage import MemoryStorage, Storage
+from .storage import MemoryStorage, Storage, supports_range
 
 logger = get_logger(__name__)
+
+_DIGITS = frozenset("0123456789")
+
+
+def _is_sequential_id(id_str: str) -> bool:
+    """True for canonical sequential ids: ASCII digits, no leading zero."""
+    return bool(id_str) and id_str[0] != "0" and all(c in _DIGITS for c in id_str)
+
+
+def _next_sequential_id(id_str: str, digits: int) -> Optional[int]:
+    """Smallest ``digits``-digit sequential id that sorts after ``id_str``.
+
+    ``id_str`` is a key suffix returned by a range over the ``digits``-length
+    bucket, so it starts with a digit but may be a custom id such as
+    ``"1x"`` or ``"1-a"``. Returns None when no such id exists in the bucket.
+    """
+    i = 0
+    while i < len(id_str) and id_str[i] in _DIGITS:
+        i += 1
+    numeric_prefix, rest = id_str[:i], id_str[i:]
+    if not rest:
+        candidate = str(int(numeric_prefix) + 1)
+    elif rest[0] > "9":
+        # "1x" > every "1<digit>": jump to the next prefix, zero-filled
+        candidate = str(int(numeric_prefix) + 1) + "0" * len(rest)
+    else:
+        # "1-a" < "10": the zero-filled prefix is the next candidate
+        candidate = numeric_prefix + "0" * len(rest)
+    if len(candidate) > digits:
+        return None
+    return max(int(candidate), 10 ** (digits - 1))
 
 
 class Database:
@@ -180,6 +211,102 @@ class Database:
         if data:
             return json.loads(data)
         return None
+
+    def max_id(self, type_name: str) -> int:
+        """Highest sequential id ever issued for ``type_name`` (0 if none)."""
+        raw = self.load("_system", f"{type_name}_id")
+        return int(raw) if raw else 0
+
+    def load_page(
+        self,
+        type_name: str,
+        from_id: int,
+        count: int,
+        max_id: Optional[int] = None,
+    ) -> List[Tuple[str, dict]]:
+        """Persisted entities of ``type_name`` with sequential id >= ``from_id``.
+
+        Returns up to ``count`` ``(id, data)`` pairs in ascending numeric id
+        order, skipping ids that were deleted. Only canonical sequential ids
+        (``"1"``, ``"42"``; no leading zeros, no custom string ids) are
+        returned, matching what probing ``1..max_id`` would find.
+
+        When the storage backend supports ``range`` (Basilisk's
+        ``StableBTreeMap``, ``MemoryStorage``) a page costs one range call per
+        digit-count bucket touched (usually one), independent of how many ids
+        were deleted. Otherwise it falls back to one ``get`` per id.
+        """
+        if from_id < 1:
+            raise ValueError("from_id must be at least 1")
+        if count < 1:
+            raise ValueError("count must be at least 1")
+        if max_id is None:
+            max_id = self.max_id(type_name)
+        if max_id < from_id:
+            return []
+        if supports_range(self._db_storage):
+            return self._load_page_range(type_name, from_id, count, max_id)
+        return self._load_page_probe(type_name, from_id, count, max_id)
+
+    def _load_page_probe(
+        self, type_name: str, from_id: int, count: int, max_id: int
+    ) -> List[Tuple[str, dict]]:
+        results: List[Tuple[str, dict]] = []
+        entity_id = from_id
+        while len(results) < count and entity_id <= max_id:
+            raw = self._db_storage.get(f"{type_name}@{entity_id}")
+            if raw:
+                results.append((str(entity_id), json.loads(raw)))
+            entity_id += 1
+        return results
+
+    def _load_page_range(
+        self, type_name: str, from_id: int, count: int, max_id: int
+    ) -> List[Tuple[str, dict]]:
+        # Keys are "Type@<id>" with unpadded decimal ids. The backend orders
+        # str keys by byte length first, then bytewise (see storage_sort_key),
+        # so all ids with the same digit count form one contiguous, numerically
+        # ordered run. Walk one run ("bucket") per digit count, from the digit
+        # count of from_id up to that of max_id.
+        prefix = f"{type_name}@"
+        results: List[Tuple[str, dict]] = []
+        digits = len(str(from_id))
+        max_digits = len(str(max_id))
+        while digits <= max_digits and len(results) < count:
+            lo_id = max(from_id, 10 ** (digits - 1))
+            if digits == max_digits:
+                # Exclusive upper bound right after max_id (same digit count),
+                # or the whole bucket if max_id is the largest d-digit number.
+                hi_id = max_id + 1
+                end = (
+                    f"{prefix}{hi_id}"
+                    if len(str(hi_id)) == digits
+                    else f"{prefix}{':' * digits}"
+                )
+            else:
+                # ':' is the character after '9': every same-length key of
+                # the form "Type@<digits>" sorts before "Type@:::".
+                end = f"{prefix}{':' * digits}"
+
+            start = f"{prefix}{lo_id}"
+            plen = len(prefix)
+            while len(results) < count:
+                need = count - len(results)
+                page = self._db_storage.range(start, end, need)
+                for key, raw in page:
+                    id_str = key[plen:]
+                    if _is_sequential_id(id_str):
+                        results.append((id_str, json.loads(raw)))
+                if len(page) < need:
+                    break  # bucket exhausted
+                # Page was full but may have contained skipped custom ids:
+                # continue from the next possible sequential id in this bucket.
+                next_id = _next_sequential_id(page[-1][0][plen:], digits)
+                if next_id is None:
+                    break
+                start = f"{prefix}{next_id}"
+            digits += 1
+        return results
 
     def delete(self, type_name: str, entity_id: str) -> None:
         """Delete the data associated with the key

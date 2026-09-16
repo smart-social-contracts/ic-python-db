@@ -3,11 +3,39 @@ Storage backends for IC Python DB
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
+
+
+def storage_sort_key(key: str) -> Tuple[int, bytes]:
+    """Sort key reproducing the on-chain order of ``str`` keys.
+
+    Basilisk's ``StableBTreeMap`` stores a ``str`` key as
+    ``tag + 4-byte big-endian length + utf-8``, so the B-tree orders keys by
+    byte length first and bytewise second: ``"T@9" < "T@10" < "T@2x"``.
+    ``MemoryStorage.range`` uses this so local tests see exactly the order a
+    canister will.
+    """
+    raw = key.encode("utf-8")
+    return (len(raw), raw)
+
+
+def supports_range(storage) -> bool:
+    """True if ``storage`` offers ``range(start, end, limit)``.
+
+    Basilisk's ``StableBTreeMap`` (>= the version that added ``range``) and
+    ``MemoryStorage`` do; older CDK builds and simple dict-backed test
+    doubles don't, and callers fall back to key probing.
+    """
+    return callable(getattr(storage, "range", None))
 
 
 class Storage(ABC):
-    """Abstract base class for storage backends"""
+    """Abstract base class for storage backends
+
+    ``range`` is optional: backends that can walk keys in order should
+    implement it (see ``storage_sort_key`` for the order that is expected);
+    callers must check ``supports_range`` and fall back to ``get`` probing.
+    """
 
     @abstractmethod
     def insert(self, key: str, value: str) -> None:
@@ -67,3 +95,24 @@ class MemoryStorage(Storage):
     def keys(self) -> Iterator[str]:
         """Return all keys in storage"""
         return iter(self._data.keys())
+
+    def range(
+        self, start: str, end: Optional[str] = None, limit: int = 1000
+    ) -> List[Tuple[str, str]]:
+        """Ordered page of ``(key, value)`` with ``start <= key < end``.
+
+        Same contract as Basilisk's ``StableBTreeMap.range``: half-open,
+        ``end=None`` means unbounded, keys ordered by ``storage_sort_key``.
+        O(n log n) here, which is fine for an in-memory test backend.
+        """
+        if limit < 0:
+            raise ValueError("limit must be >= 0")
+        lo = storage_sort_key(start)
+        hi = None if end is None else storage_sort_key(end)
+        selected = [
+            k
+            for k in self._data
+            if lo <= storage_sort_key(k) and (hi is None or storage_sort_key(k) < hi)
+        ]
+        selected.sort(key=storage_sort_key)
+        return [(k, self._data[k]) for k in selected[:limit]]

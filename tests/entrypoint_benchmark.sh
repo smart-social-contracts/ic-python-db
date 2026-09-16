@@ -13,7 +13,11 @@ TEMPLATE_PATH="${TEMPLATE_DIR}/cpython_canister_template.wasm"
 if [ ! -f "$TEMPLATE_PATH" ]; then
     echo "Downloading CPython canister template..."
     mkdir -p "$TEMPLATE_DIR"
-    curl -fL https://github.com/smart-social-contracts/basilisk/releases/download/cpython-wasm-3.13.0/cpython_canister_template.wasm \
+    # Prefer the template attached to the installed Basilisk release (this is
+    # where basilisk.find_template_wasm looks); fall back to the rolling CI asset.
+    curl -fL "https://github.com/smart-social-contracts/basilisk/releases/download/v${BASILISK_VERSION}/cpython_canister_template.wasm" \
+         -o "$TEMPLATE_PATH" || \
+    curl -fL https://github.com/smart-social-contracts/basilisk/releases/download/cpython-wasm-3.13.0-ic1/cpython_canister_template.wasm \
          -o "$TEMPLATE_PATH"
     echo "Template downloaded: $(du -sh "$TEMPLATE_PATH" | cut -f1)"
 fi

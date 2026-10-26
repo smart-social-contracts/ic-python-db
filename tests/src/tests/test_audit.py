@@ -22,6 +22,31 @@ class TestAudit:
         """Test if the audit database is initialized correctly."""
         assert self.db._db_audit is not None
 
+    def test_audit_counters_survive_reinit(self):
+        """Re-initializing over existing storage (as after a canister upgrade)
+        must not reset the audit counters and overwrite old records."""
+        self.db.save("test_type", "1", {"field": "value"})
+        storage, audit = self.db._db_storage, self.db._db_audit
+
+        Database._instance = None
+        self.db = Database.init(audit_enabled=True, db_storage=storage, db_audit=audit)
+        self.db.save("test_type", "2", {"field": "value"})
+
+        assert "test_type@1" in self.db._db_audit.get("0")
+        assert "test_type@2" in self.db._db_audit.get("1")
+        assert self.db._db_audit.get("_max_id") == "2"
+
+    def test_clear_page_resets_audit(self):
+        for i in range(1, 6):
+            self.db.save("test_type", str(i), {"field": "value"})
+        while not self.db.clear_page(limit=3):
+            pass
+        assert self.db._db_audit.get("0") is None
+        assert self.db._db_audit.get("_min_id") == "0"
+        assert self.db._db_audit.get("_max_id") == "0"
+        self.db.save("test_type", "1", {"field": "value"})
+        assert "save" in self.db._db_audit.get("0")
+
     def test_audit_log_save_operation(self):
         """Test if a save operation is logged correctly in the audit database."""
         self.db.save("test_type", "1", {"field": "value"})

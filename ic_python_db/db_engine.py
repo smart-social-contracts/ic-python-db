@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ic_python_logging import get_logger
 
-from .storage import MemoryStorage, Storage, supports_range
+from .storage import MemoryStorage, Storage, storage_sort_key, supports_range
 
 logger = get_logger(__name__)
 
@@ -88,12 +88,10 @@ class Database:
             self._db_audit = db_audit if db_audit else MemoryStorage()
 
         if self._db_audit:
-            self._db_audit.insert("_min_id", "0")
-            self._db_audit.insert("_max_id", "0")
-
-            logger.debug(
-                f"Audit database initialized with {len(list(self._db_audit.items()))} items"
-            )
+            # Keep existing counters so records survive canister upgrades
+            for key in ("_min_id", "_max_id"):
+                if self._db_audit.get(key) is None:
+                    self._db_audit.insert(key, "0")
 
         self._entity_types = {}
         # Entity registry: {(type_name, entity_id): weakref to entity instance}
@@ -146,6 +144,53 @@ class Database:
 
         self._db_audit.insert("_min_id", "0")
         self._db_audit.insert("_max_id", "0")
+
+    def clear_page(self, limit: int = 500) -> bool:
+        """Remove up to ``limit`` keys; True once storage and audit log are empty.
+
+        Bounded per call, so a large database can be cleared across several
+        messages or timer ticks (issue #19)::
+
+            while not db.clear_page():
+                pass
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        self.clear_registry()
+        budget = limit
+        for storage in (self._db_storage, self._db_audit):
+            if storage is None or budget == 0:
+                continue
+            rows, _ = self._page(storage, "", budget)
+            for key, _ in rows:
+                storage.remove(key)
+            budget -= len(rows)
+        if budget == 0:
+            return False
+        if self._db_audit:
+            self._db_audit.insert("_min_id", "0")
+            self._db_audit.insert("_max_id", "0")
+        return True
+
+    @staticmethod
+    def _page(
+        storage, start: str, limit: int
+    ) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+        """Up to ``limit`` pairs from ``start`` in key order, plus the key to resume from."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if supports_range(storage):
+            rows = storage.range(start, None, limit + 1)
+        else:
+            lo = storage_sort_key(start)
+            keys = sorted(
+                (k for k in storage.keys() if storage_sort_key(k) >= lo),
+                key=storage_sort_key,
+            )[: limit + 1]
+            rows = [(k, storage.get(k)) for k in keys]
+        if len(rows) > limit:
+            return rows[:limit], rows[limit][0]
+        return rows, None
 
     def register_entity(self, entity_instance):
         """Register an entity instance in the identity map."""
@@ -417,21 +462,49 @@ class Database:
         Returns:
             JSON string containing all database data organized by type
         """
+        result = self._group_by_type(
+            (key, self._db_storage.get(key)) for key in self._db_storage.keys()
+        )
+        if pretty:
+            return json.dumps(result, indent=2)
+        return json.dumps(result)
+
+    @staticmethod
+    def _group_by_type(rows) -> Dict[str, Dict[str, Any]]:
         result = {}
-        for key in self._db_storage.keys():
+        for key, value in rows:
             if key.startswith("_"):  # Skip internal keys
                 continue
             try:
                 type_name, id = key.split("@")
-                if type_name not in result:
-                    result[type_name] = {}
-                result[type_name][id] = json.loads(self._db_storage.get(key))
+                result.setdefault(type_name, {})[id] = json.loads(value)
             except (ValueError, json.JSONDecodeError):
                 continue  # Skip invalid entries
+        return result
 
-        if pretty:
-            return json.dumps(result, indent=2)
-        return json.dumps(result)
+    def dump_page(
+        self, start: str = "", limit: int = 500
+    ) -> Tuple[Dict[str, Dict[str, Any]], Optional[str]]:
+        """One bounded page of ``dump_json`` data, plus the key to resume from.
+
+        Reads up to ``limit`` storage keys from ``start`` (inclusive); internal
+        keys are read but not returned, so a page may hold fewer entities.
+        The second value is None once the end of storage is reached::
+
+            page, cursor = db.dump_page()
+            while cursor is not None:
+                page, cursor = db.dump_page(cursor)
+        """
+        rows, next_key = self._page(self._db_storage, start, limit)
+        return self._group_by_type(rows), next_key
+
+    def raw_dump_page(
+        self, start: str = "", limit: int = 500
+    ) -> Tuple[Dict[str, str], Optional[str]]:
+        """One bounded page of raw storage (``raw_dump_json`` data), plus the key
+        to resume from, or None once the end of storage is reached."""
+        rows, next_key = self._page(self._db_storage, start, limit)
+        return dict(rows), next_key
 
     def raw_dump_json(self, pretty: bool = False) -> str:
         """Dump the raw contents of the storage as a JSON string.

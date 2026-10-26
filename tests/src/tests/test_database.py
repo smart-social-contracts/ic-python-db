@@ -134,6 +134,42 @@ class TestDatabase:
         assert "\n" in pretty_dumped
         assert json.loads(pretty_dumped) == dumped
 
+    def test_database_dump_page(self):
+        for i in range(1, 26):
+            self.db.save("person", str(i), {"n": i})
+        self.db.save("_system", "person_id", "25")
+
+        merged, raw, cursor, pages = {}, {}, "", 0
+        while cursor is not None:
+            page, cursor = self.db.dump_page(cursor, limit=7)
+            for type_name, entities in page.items():
+                merged.setdefault(type_name, {}).update(entities)
+            pages += 1
+        assert pages == 4
+        assert merged == json.loads(self.db.dump_json())
+
+        cursor = ""
+        while cursor is not None:
+            page, cursor = self.db.raw_dump_page(cursor, limit=7)
+            assert len(page) <= 7
+            raw.update(page)
+        assert raw == json.loads(self.db.raw_dump_json())
+
+        assert self.db.dump_page(limit=100) == (merged, None)
+        Tester.assert_raises(ValueError, lambda: self.db.dump_page(limit=0))
+
+    def test_database_clear_page(self):
+        for i in range(1, 26):
+            self.db.save("person", str(i), {"n": i})
+
+        calls = 1
+        while not self.db.clear_page(limit=10):
+            calls += 1
+        assert calls > 1
+        assert json.loads(self.db.raw_dump_json()) == {}
+        assert self.db.clear_page(limit=10) is True
+        Tester.assert_raises(ValueError, lambda: self.db.clear_page(limit=0))
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestDatabase)

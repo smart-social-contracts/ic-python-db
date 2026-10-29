@@ -183,6 +183,31 @@ The rebuild is idempotent. The `indexed` flag is not part of the schema descript
 
 Each matching id is its own storage entry, so a value can match any number of entities without reaching the backing store's `max_value_size`.
 
+## Sorted Fields
+
+Declare `sorted=True` on an `Integer` or `Float` property to read entities in its order, highest or lowest first, without loading and sorting them all. `__sorted_indexes__` adds indexes over several fields, where each field breaks ties in the one before:
+
+```python
+class Listing(Entity):
+    name = String()
+    installs = Integer(sorted=True)
+    likes = Integer(sorted=True)
+    updated_at = Float(sorted=True)
+    __sorted_indexes__ = [("installs", "likes")]   # installs, then likes
+
+top, cursor = Listing.top_by("installs", count=20)              # most installed
+top, cursor = Listing.top_by(("installs", "likes"), count=20)   # ties broken by likes
+recent, cursor = Listing.top_by("updated_at", count=20)
+oldest, cursor = Listing.top_by("updated_at", count=20, descending=False)
+more, cursor = Listing.top_by("installs", count=20, cursor=cursor)   # next page; None at the end
+```
+
+The storage map keeps keys in order, so each entity has one index entry per sorted index whose key starts with its values. Writing a sorted field moves that entry (a few storage operations), and a page is one range read plus `count` loads, however many entities exist. Ties go to the higher id; entities with None in a field are left out of indexes on it. Integers must fit in 64 bits.
+
+`where=` drops entities that fail a test. At most `scan_limit` entries (default 200) are read per call, so with a selective filter a page can come back short with a cursor: call again.
+
+Fields made sorted after rows exist, or whose type changed, need a resumable rebuild (`Listing.rebuild_sorted_index("installs", from_id=cursor)`, until it returns None). A `migrate()` that changes a sorted or indexed value moves the entity's entries when it is loaded.
+
 ## Large Relations
 
 `OneToMany` and `ManyToMany` getters return a `RelationView`, not a list. Questions about the relation and single pages never load every member, so they stay cheap however large it grows:

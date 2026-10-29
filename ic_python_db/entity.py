@@ -1,6 +1,6 @@
 """Enhanced entity implementation with support for mixins and entity types."""
 
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, TypeVar
 
 from ic_python_logging import get_logger
 
@@ -11,6 +11,44 @@ logger = get_logger(__name__)
 
 
 T = TypeVar("T", bound="Entity")
+
+_I64_MIN, _I64_LIMIT = -(1 << 63), 1 << 63
+_INF = float("inf")
+
+
+def _float_bits(value: float) -> int:
+    """The IEEE 754 bit pattern of abs(value), read from float.hex().
+
+    The canister's ``struct`` module is a stub without pack/unpack.
+    """
+    mantissa, exponent = float.hex(abs(value))[2:].split("p")
+    lead, fraction = mantissa.split(".")
+    fraction_bits = int(fraction.ljust(13, "0"), 16)
+    if lead == "0":
+        return fraction_bits  # zero or subnormal: biased exponent 0
+    return ((int(exponent) + 1023) << 52) | fraction_bits
+
+
+def _sort_encode(value: Any) -> str:
+    """A value as 20 decimal digits whose string order is the value's order.
+
+    Integers are offset into 0..2**64-1; finite floats use their IEEE 754
+    bits around 2**63, so that negative numbers come first.
+    """
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, int):
+        if not _I64_MIN <= value < _I64_LIMIT:
+            raise ValueError(f"sorted Integer values must fit in 64 bits: {value}")
+        unsigned = value - _I64_MIN
+    elif isinstance(value, float):
+        if value != value or value in (_INF, -_INF):
+            raise ValueError(f"sorted Float values must be finite: {value}")
+        bits = _float_bits(value)
+        unsigned = (1 << 63) - bits if value < 0 else (1 << 63) + bits
+    else:
+        raise TypeError(f"sorted fields hold numbers, got {type(value).__name__}")
+    return str(unsigned).zfill(20)
 
 
 class Entity:
@@ -439,6 +477,7 @@ class Entity:
                 f"Version mismatch for {type_name}@{entity_id}: "
                 f"stored={stored_version}, current={current_version}"
             )
+            stored = dict(data)  # migrate() may change data in place
             # Apply custom migration first (developer logic takes priority)
             data = cls.migrate(data, stored_version, current_version)
             # Auto-inject defaults for new fields not handled by migrate()
@@ -451,11 +490,24 @@ class Entity:
         # Create instance first
         entity = cls(**data, _loaded=True)
 
-        # If migration was applied, persist the migrated data
+        # If migration was applied, persist the migrated data and move its
+        # index entries along with any value migrate() changed
         if stored_version != current_version:
             entity._save()
+            entity._reindex_after_migration(stored)
 
         return entity
+
+    def _reindex_after_migration(self, stored: dict) -> None:
+        db = self.db()
+        for field in self._indexed_properties():
+            old, new = stored.get(field), getattr(self, field, None)
+            if old != new:
+                if old is not None:
+                    db.field_index_remove(self._type, field, str(old), self._id)
+                if new is not None:
+                    db.field_index_add(self._type, field, str(new), self._id)
+        self._sync_sorted()
 
     @classmethod
     def _require_unpaged(cls, method: str) -> None:
@@ -724,6 +776,168 @@ class Entity:
         return entities, next_from_id
 
     @classmethod
+    def _sorted_indexes(cls) -> Dict[str, Tuple[str, ...]]:
+        """{index name: fields} for this type's sorted indexes.
+
+        A property declared ``sorted=True`` gets its own index; a class's
+        ``__sorted_indexes__`` adds indexes over several fields, compared in
+        order (the second breaks ties in the first, and so on).
+        """
+        cached = cls.__dict__.get("_sorted_cache")
+        if cached is not None:
+            return cached
+        from .properties import Property
+
+        props: Dict[str, Any] = {}
+        for klass in reversed(cls.__mro__):
+            for attr_name, attr_value in klass.__dict__.items():
+                if not attr_name.startswith("_") and isinstance(attr_value, Property):
+                    props[attr_name] = attr_value
+        indexes: Dict[str, Tuple[str, ...]] = {
+            name: (name,) for name, prop in props.items() if prop.sorted
+        }
+        for spec in getattr(cls, "__sorted_indexes__", ()) or ():
+            fields = (spec,) if isinstance(spec, str) else tuple(spec)
+            for field in fields:
+                prop = props.get(field)
+                if prop is None or prop.type not in (int, float):
+                    raise TypeError(
+                        f"{cls.__name__}.__sorted_indexes__: {field} is not an "
+                        f"Integer or Float property"
+                    )
+            indexes[",".join(fields)] = fields
+        cls._sorted_cache = indexes
+        return indexes
+
+    def _sync_sorted(
+        self, field: Optional[str] = None, index: Optional[str] = None
+    ) -> None:
+        """Bring this entity's sorted index entries up to date: the indexes
+        that contain ``field``, only ``index``, or all of them."""
+        if self._id is None:
+            return
+        db = self.db()
+        for name, fields in self._sorted_indexes().items():
+            if (field is not None and field not in fields) or (
+                index is not None and name != index
+            ):
+                continue
+            values = [getattr(self, f, None) for f in fields]
+            encoded = (
+                None
+                if any(v is None for v in values)
+                else "".join(_sort_encode(v) for v in values)
+            )
+            db.sorted_index_set(self._type, name, self._id, encoded)
+
+    @classmethod
+    def _sorted_index_name(cls, fields) -> Tuple[str, Tuple[str, ...]]:
+        key = (fields,) if isinstance(fields, str) else tuple(fields)
+        name = ",".join(key)
+        if name not in cls._sorted_indexes():
+            raise ValueError(
+                f"{cls.__name__} has no sorted index on {name}: declare the "
+                f"property sorted=True, or list the fields in __sorted_indexes__"
+            )
+        return name, key
+
+    @classmethod
+    def top_by(
+        cls: Type[T],
+        fields,
+        count: int = 20,
+        cursor: Optional[str] = None,
+        descending: bool = True,
+        where: Optional[Callable[[Any], bool]] = None,
+        scan_limit: int = 200,
+    ) -> Tuple[List[T], Optional[str]]:
+        """One page of entities in the order of a sorted index.
+
+        ``fields`` is a field declared ``sorted=True``, or a tuple listed in
+        ``__sorted_indexes__``. Highest first unless ``descending=False``;
+        ties go to the higher id. Entities with None in any of the fields are
+        not indexed.
+
+        Returns (entities, cursor); pass the cursor back for the next page,
+        None once the index is exhausted. ``where`` drops entities that fail
+        it. At most ``scan_limit`` entries are read per call, so with a
+        selective ``where`` a page can come back short, or empty, with a
+        cursor: call again. Cost is bounded by ``scan_limit`` loads, however
+        many entities exist::
+
+            top, cursor = Listing.top_by("installs", count=20)
+            top, cursor = Listing.top_by(("installs", "likes"), count=20)
+        """
+        if count < 1:
+            raise ValueError("count must be at least 1")
+        if scan_limit < 1:
+            raise ValueError("scan_limit must be at least 1")
+        name, key = cls._sorted_index_name(fields)
+        db = cls.db()
+        type_name = cls.get_full_type_name()
+        found: List[T] = []
+        read = 0
+        start = cursor
+        chunk = count  # with `where`, doubled each round: rows read track rows kept
+        while len(found) < count and read < scan_limit:
+            want = min(
+                count - len(found) if where is None else chunk, scan_limit - read, 100
+            )
+            chunk *= 2
+            rows = db.sorted_index_scan(
+                type_name, name, len(key), descending, start, want
+            )
+            for row_key, entity_id in rows:
+                read += 1
+                # The next same-length key: where a later page starts
+                start = row_key[:-1] + chr(ord(row_key[-1]) + 1)
+                entity = cls.load(entity_id)
+                if entity is not None and (where is None or where(entity)):
+                    found.append(entity)
+                    if len(found) >= count:
+                        break
+            else:
+                if len(rows) < want:
+                    return found, None  # index exhausted
+        if start is None or not db.sorted_index_scan(
+            type_name, name, len(key), descending, start, 1
+        ):
+            return found, None
+        return found, start
+
+    @classmethod
+    def rebuild_sorted_index(
+        cls: Type[T], fields=None, from_id: int = 1, batch: int = 200
+    ) -> Optional[int]:
+        """Index one batch of existing entities in a sorted index (all of
+        them when ``fields`` is None); resumable and idempotent.
+
+        Use it after declaring a field sorted, or after changing a sorted
+        field's type: each entity's stale entry is replaced, whatever it was::
+
+            cursor = 1
+            while cursor is not None:
+                cursor = Listing.rebuild_sorted_index("installs", from_id=cursor)
+
+        Returns the from_id for the next batch, or None when done.
+        """
+        if from_id < 1:
+            raise ValueError("from_id must be at least 1")
+        if batch < 1:
+            raise ValueError("batch must be at least 1")
+        name = None if fields is None else cls._sorted_index_name(fields)[0]
+        max_id = cls.max_id()
+        if max_id == 0 or from_id > max_id:
+            return None
+        entities = cls.load_some(from_id, batch)
+        for entity in entities:
+            entity._sync_sorted(index=name)
+        if len(entities) < batch:
+            return None
+        next_from_id = int(entities[-1]._id) + 1
+        return next_from_id if next_from_id <= max_id else None
+
+    @classmethod
     def count(cls: Type[T]) -> int:
         """Get the total count of entities of this type.
 
@@ -944,6 +1158,9 @@ class Entity:
             value = getattr(self, field_name, None)
             if value is not None:
                 db.field_index_remove(self._type, field_name, str(value), self._id)
+
+        for name in self._sorted_indexes():
+            db.sorted_index_set(self._type, name, self._id, None)
 
         db.delete(self._type, self._id)
 

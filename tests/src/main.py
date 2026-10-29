@@ -19,6 +19,7 @@ from tests import (
     test_relationships,
     test_scaling,
     test_serialization,
+    test_sorted,
     test_stress,
     test_upgrade_after,
     test_upgrade_before,

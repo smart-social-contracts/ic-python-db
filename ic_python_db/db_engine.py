@@ -20,6 +20,14 @@ _HEX = frozenset("0123456789abcdef")
 _ID_WIDTH = 12
 _HASH_WIDTH = 24
 _SCAN_PAGE = 500
+_BUCKETS = (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g"))
+# Purge queue of deleted index sets (see _ix_clear): fixed-width positions
+# keep its entries contiguous in key order
+_PQ = "_pq@"
+_PQ_HEAD = "_pq:head"
+_PQ_TAIL = "_pq:tail"
+# Entries of deleted sets each index write removes on the side
+_PURGE_PER_WRITE = 20
 
 
 def _is_sequential_id(id_str: str) -> bool:
@@ -104,6 +112,9 @@ class Database:
         self._entity_types = {}
         # Entity registry: {(type_name, entity_id): weakref to entity instance}
         self._entity_registry = {}
+        # Whether deleted index sets may still have entries to purge (None:
+        # not checked yet). Kept in the heap: a query discards it with its writes.
+        self._purge_pending = None
 
     def as_user(self, user_id: str):
         """Context manager for running operations as a specific user.
@@ -142,6 +153,7 @@ class Database:
 
         # Also clear the entity registry
         self.clear_registry()
+        self._purge_pending = None
 
         if not self._db_audit:
             return
@@ -557,7 +569,10 @@ class Database:
         return len(unique)
 
     def _ix_add(self, base: str, entity_id: str) -> None:
+        self._purge_some()
         count = self._ix_count(base)
+        if count == 0:
+            self._ix_revive(base)
         key = self._ix_entry_key(base, entity_id)
         if self._db_storage.get(key) is not None:
             return
@@ -565,6 +580,7 @@ class Database:
         self._db_storage.insert(f"{base}|c", str(count + 1))
 
     def _ix_remove(self, base: str, entity_id: str) -> None:
+        self._purge_some()
         count = self._ix_count(base)
         if count == 0:
             return
@@ -601,17 +617,19 @@ class Database:
             if all(c in _DIGITS for c in key[cut:])
         ]
 
-    def _ix_bucket(self, base: str, tag: str, width: int, top: str):
+    def _ix_bucket(
+        self, base: str, tag: str, width: int, top: str, page_size: int = _SCAN_PAGE
+    ):
         start = f"{base}|{tag}{'0' * width}"
         end = f"{base}|{tag}{top * width}"
         cut = len(base) + 2
         valid = _DIGITS if tag == "n" else _HEX
         while True:
-            page = self._scan(start, end, _SCAN_PAGE)
+            page = self._scan(start, end, page_size)
             for key, value in page:
                 if all(c in valid for c in key[cut:]):
                     yield key, value
-            if len(page) < _SCAN_PAGE:
+            if len(page) < page_size:
                 return
             # Smallest same-length key after the last one: append the lowest
             # char and drop the last, i.e. bump by one in the key order.
@@ -627,12 +645,90 @@ class Database:
         return ids
 
     def _ix_clear(self, base: str) -> None:
+        """Empty a set in O(1); its entries are purged in bounded steps.
+
+        Every reader checks the counter first, so removing it empties the set
+        at once. The entries are queued and removed by later index writes
+        (_PURGE_PER_WRITE each) or by purge_step(). ``{base}|d`` marks the set
+        as dead and holds its queue position, so re-adding to it (a reused
+        custom id) purges the leftovers first instead of reviving them.
+        """
         if self._ix_count(base) == 0:
             return
-        for tag, width, top in (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g")):
-            for key in [k for k, _ in self._ix_bucket(base, tag, width, top)]:
+        storage = self._db_storage
+        tail = int(storage.get(_PQ_TAIL) or 0)
+        storage.insert(self._pq_key(tail), base)
+        storage.insert(_PQ_TAIL, str(tail + 1))
+        storage.insert(f"{base}|d", str(tail))
+        storage.remove(f"{base}|c")
+        self._purge_pending = True
+
+    @staticmethod
+    def _pq_key(position: int) -> str:
+        return f"{_PQ}{str(position).zfill(_ID_WIDTH)}"
+
+    def _ix_drain(self, base: str, limit: int) -> int:
+        """Remove up to ``limit`` entries of ``base``; returns how many."""
+        removed = 0
+        for tag, width, top in _BUCKETS:
+            keys = []
+            page_size = min(limit - removed, _SCAN_PAGE)
+            for key, _ in self._ix_bucket(base, tag, width, top, page_size):
+                if removed + len(keys) >= limit:
+                    break
+                keys.append(key)
+            for key in keys:
                 self._db_storage.remove(key)
-        self._db_storage.remove(f"{base}|c")
+            removed += len(keys)
+            if removed >= limit:
+                break
+        return removed
+
+    def _ix_revive(self, base: str) -> None:
+        """Before reusing a deleted set: purge its leftovers, drop its queue entry."""
+        position = self._db_storage.get(f"{base}|d")
+        if position is None:
+            return
+        while self._ix_drain(base, _SCAN_PAGE) == _SCAN_PAGE:
+            pass
+        self._db_storage.remove(f"{base}|d")
+        queued = self._pq_key(int(position))
+        if self._db_storage.get(queued) is not None:
+            self._db_storage.remove(queued)
+
+    def _purge_some(self) -> None:
+        if self._purge_pending is not False:
+            self.purge_step(_PURGE_PER_WRITE)
+
+    def purge_step(self, limit: int = 500) -> bool:
+        """Remove up to ``limit`` entries of deleted index sets.
+
+        Deleting an entity empties its relation indexes at once; their entries
+        are removed in the background, a few by each later index write. A
+        timer can call this to finish sooner. Returns True when nothing is
+        left to purge.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        storage = self._db_storage
+        head = int(storage.get(_PQ_HEAD) or 0)
+        tail = int(storage.get(_PQ_TAIL) or 0)
+        start, budget = head, limit
+        while head < tail and budget > 0:
+            queued = self._pq_key(head)
+            base = storage.get(queued)
+            removed = self._ix_drain(base, budget) if base is not None else 0
+            if removed == budget:
+                break  # out of budget, maybe not drained yet
+            budget -= removed
+            if base is not None:
+                storage.remove(f"{base}|d")
+                storage.remove(queued)
+            head += 1
+        if head != start:
+            storage.insert(_PQ_HEAD, str(head))
+        self._purge_pending = head < tail
+        return not self._purge_pending
 
     # ── Reverse Index API ──────────────────────────────────────────────────────
     #

@@ -137,7 +137,6 @@ def _prod_db():
     return fresh_db(PROD_MAX_KEY_SIZE, PROD_MAX_VALUE_SIZE)
 
 
-@_known("18")
 def test_many_children_fit_in_production_limits():
     _prod_db()
     sc.world_owner.build(3000)
@@ -204,6 +203,7 @@ EXEMPT = {
     "Database.dump_page": "bounded by its limit argument (#19)",
     "Database.raw_dump_page": "bounded by its limit argument (#19)",
     "Database.get_audit_page": "bounded by its limit argument",
+    "Database.purge_step": "bounded by its limit argument",
     "Entity.db": "in-memory bookkeeping",
     "Entity.get_full_type_name": "in-memory bookkeeping",
     "Entity.migrate": "user hook, run by load (test_loading_old_version_*)",

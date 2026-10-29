@@ -617,12 +617,49 @@ class TestReverseIndexResolution:
         )
         assert page == ids[100:103]
 
+        dept_type, dept_id = dept._type, dept._id
         dept.delete()
+        # Empty at once; the entries go in bounded purge steps
+        assert db.reverse_index_count(dept_type, dept_id, "employees") == 0
+        assert db.reverse_index_get(dept_type, dept_id, "employees") == []
+        steps = 0
+        while not db.purge_step(limit=100):
+            steps += 1
+        assert steps >= 6  # 620 entries, 100 per step
         assert not [
             k
             for k in db._db_storage.keys()
-            if k.startswith(f"_ri:{dept._type}:{dept._id}:")
+            if k.startswith(f"_ri:{dept_type}:{dept_id}:")
         ]
+
+    def test_deleted_parent_entries_are_purged_by_later_writes(self):
+        db = Database.get_instance()
+        dept = Department(name="Gone")
+        for i in range(30):
+            Employee(name=f"G{i}").department = dept
+        dept_type, dept_id = dept._type, dept._id
+        dept.delete()
+        other = Department(name="Busy")
+        for i in range(5):  # each index write purges a few entries on the side
+            Employee(name=f"B{i}").department = other
+        assert not [
+            k
+            for k in db._db_storage.keys()
+            if k.startswith(f"_ri:{dept_type}:{dept_id}:")
+        ]
+        assert db.purge_step()
+
+    def test_reused_custom_id_does_not_revive_deleted_children(self):
+        db = Database.get_instance()
+        dept = Department(name="Reused", _id="reused")
+        for i in range(50):  # more than one write purges on the side
+            Employee(name=f"R{i}").department = dept
+        dept.delete()
+        again = Department(name="Reused", _id="reused")
+        newcomer = Employee(name="New")
+        newcomer.department = again
+        assert [e.name for e in again.employees] == ["New"]
+        assert db.purge_step()
 
     def test_custom_id_children(self):
         dept = Department(name="Custom")

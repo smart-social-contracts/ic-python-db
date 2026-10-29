@@ -505,9 +505,11 @@ class Entity:
     ) -> Tuple[List[T], Optional[int]]:
         """Equality lookup on an indexed field with cursor pagination (issue #11).
 
-        IDs come from the persistent field index, so cost is proportional to
-        the number of matches, not to max_id. Results are ordered by ascending
-        entity ID, compatible with load_some-style cursors.
+        IDs come from the persistent field index with one range read per
+        page, so cost is proportional to ``count``, not to the number of
+        matches or to max_id. Results are ordered by ascending entity ID,
+        compatible with load_some-style cursors. Entities with custom
+        (non-sequential) ids are not returned.
 
         Args:
             field: Name of a property declared with indexed=True
@@ -528,34 +530,32 @@ class Entity:
         if count < 1:
             raise ValueError("count must be at least 1")
 
-        ids = cls.db().field_index_get(cls.get_full_type_name(), field, str(value))
-        matching = sorted((int(i) for i in ids if i.isdigit() and int(i) >= from_id))
-
+        db = cls.db()
+        type_name = cls.get_full_type_name()
         entities: List[T] = []
-        last_id = None
-        for entity_id in matching:
-            if len(entities) >= count:
-                break
-            entity = cls.load(str(entity_id))
-            if entity is not None:
-                entities.append(entity)
-            last_id = entity_id
-
-        has_more = last_id is not None and any(i > last_id for i in matching)
-        next_from_id = (last_id + 1) if has_more else None
-        return entities, next_from_id
+        cursor = from_id
+        while len(entities) < count:
+            need = count - len(entities)
+            # One extra id tells whether another page exists
+            ids = db.field_index_page(type_name, field, str(value), cursor, need + 1)
+            for entity_id in ids[:need]:
+                entity = cls.load(entity_id)
+                if entity is not None:
+                    entities.append(entity)
+            if len(ids) <= need:
+                return entities, None
+            cursor = int(ids[need])
+        return entities, cursor
 
     @classmethod
     def count_by(cls: Type[T], field: str, value: Any) -> int:
-        """Number of entities whose indexed ``field`` equals ``value``.
+        """Number of entities whose indexed ``field`` equals ``value`` (one read).
 
         Raises:
             ValueError: If the field is not declared with indexed=True
         """
         cls._require_indexed_field(field)
-        return len(
-            cls.db().field_index_get(cls.get_full_type_name(), field, str(value))
-        )
+        return cls.db().field_index_count(cls.get_full_type_name(), field, str(value))
 
     @classmethod
     def rebuild_field_index(

@@ -14,6 +14,7 @@ from tests import (
     test_namespaces,
     test_properties,
     test_relationships,
+    test_scaling,
     test_serialization,
     test_stress,
     test_upgrade_after,
@@ -23,14 +24,13 @@ from tests import (
 # Unique memory IDs for stable storage isolation
 # memory_id = 0  # Main database storage
 # memory_id = 1  # Audit log storage
-# Size limits for stable storage maps
-# max_key_size = 100  # Maximum key size in bytes
-# max_value_size = 2048  # Maximum value size in bytes (2KB)
+# Size limits for stable storage maps: the main map uses the settings Casals
+# runs with in production, so tests hit the same ceilings it would.
 
 db_storage = StableBTreeMap[str, str](
     memory_id=0,
-    max_key_size=100,
-    max_value_size=2048,
+    max_key_size=256,
+    max_value_size=20000,
 )
 
 db_audit = StableBTreeMap[str, str](

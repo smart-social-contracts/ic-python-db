@@ -119,7 +119,6 @@ def test_loading_old_version_does_not_write():
 # ── Heap ────────────────────────────────────────────────────────────────────
 
 
-@_known("heap")
 def test_heap_does_not_keep_loaded_entities():
     """The heap survives between calls, so entities nobody holds must go."""
     fresh_db()

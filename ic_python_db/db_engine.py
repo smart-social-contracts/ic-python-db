@@ -2,6 +2,7 @@
 Core database engine implementation
 """
 
+import hashlib
 import json
 import time
 import weakref
@@ -9,11 +10,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ic_python_logging import get_logger
 
-from .storage import MemoryStorage, Storage, supports_range
+from .storage import MemoryStorage, Storage, storage_sort_key, supports_range
 
 logger = get_logger(__name__)
 
 _DIGITS = frozenset("0123456789")
+_HEX = frozenset("0123456789abcdef")
+# Posting-list entry suffix widths (see "Posting lists" below)
+_ID_WIDTH = 12
+_HASH_WIDTH = 24
+_SCAN_PAGE = 500
+_BUCKETS = (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g"))
+# Purge queue of deleted index sets (see _ix_clear): fixed-width positions
+# keep its entries contiguous in key order
+_PQ = "_pq@"
+_PQ_HEAD = "_pq:head"
+_PQ_TAIL = "_pq:tail"
+# Entries of deleted sets each index write removes on the side
+_PURGE_PER_WRITE = 20
 
 
 def _is_sequential_id(id_str: str) -> bool:
@@ -98,6 +112,9 @@ class Database:
         self._entity_types = {}
         # Entity registry: {(type_name, entity_id): weakref to entity instance}
         self._entity_registry = {}
+        # Whether deleted index sets may still have entries to purge (None:
+        # not checked yet). Kept in the heap: a query discards it with its writes.
+        self._purge_pending = None
 
     def as_user(self, user_id: str):
         """Context manager for running operations as a specific user.
@@ -136,6 +153,7 @@ class Database:
 
         # Also clear the entity registry
         self.clear_registry()
+        self._purge_pending = None
 
         if not self._db_audit:
             return
@@ -493,13 +511,231 @@ class Database:
 
         return check_upgrade_compatibility(self, raise_on_error=raise_on_error)
 
+    # ── Posting lists (issue #18) ──────────────────────────────────────────────
+    #
+    # Field indexes and reverse indexes map one base key to a set of entity
+    # ids. Each id is its own storage entry, so adding or removing one costs
+    # O(1) storage operations however many ids share the base, and a page is
+    # one range read:
+    #
+    #   {base}|n{id zero-padded to _ID_WIDTH}  -> id   canonical sequential ids
+    #   {base}|h{sha256(id)[:_HASH_WIDTH]}     -> id   any other id
+    #   {base}|c                               -> number of ids
+    #
+    # Storage orders str keys by length, then bytewise (storage_sort_key), so
+    # fixed-width suffixes keep one base's entries contiguous, and the "n"
+    # entries come back in ascending numeric id order.
+    #
+    # Before 0.13 a base key held the whole set as one JSON array, which hit
+    # the value-size limit at ~10k ids. Such an array is converted to entries
+    # the first time its base is touched (see _ix_count).
+
+    def _scan(self, start: str, end: str, limit: int) -> List[Tuple[str, str]]:
+        if supports_range(self._db_storage):
+            return self._db_storage.range(start, end, limit)
+        lo, hi = storage_sort_key(start), storage_sort_key(end)
+        keys = sorted(
+            (k for k in self._db_storage.keys() if lo <= storage_sort_key(k) < hi),
+            key=storage_sort_key,
+        )
+        return [(k, self._db_storage.get(k)) for k in keys[:limit]]
+
+    @staticmethod
+    def _ix_entry_key(base: str, entity_id: str) -> str:
+        if _is_sequential_id(entity_id) and len(entity_id) <= _ID_WIDTH:
+            return f"{base}|n{entity_id.zfill(_ID_WIDTH)}"
+        digest = hashlib.sha256(entity_id.encode("utf-8")).hexdigest()
+        return f"{base}|h{digest[:_HASH_WIDTH]}"
+
+    def _ix_count(self, base: str) -> int:
+        raw = self._db_storage.get(f"{base}|c")
+        if raw is not None:
+            return int(raw)
+        legacy = self._db_storage.get(base)
+        if legacy is None:
+            return 0
+        try:
+            ids = json.loads(legacy)
+        except ValueError:
+            return 0
+        if not isinstance(ids, list):
+            return 0
+        self._db_storage.remove(base)
+        unique = {str(i) for i in ids}
+        for entity_id in unique:
+            self._db_storage.insert(self._ix_entry_key(base, entity_id), entity_id)
+        if unique:
+            self._db_storage.insert(f"{base}|c", str(len(unique)))
+        return len(unique)
+
+    def _ix_add(self, base: str, entity_id: str) -> None:
+        self._purge_some()
+        count = self._ix_count(base)
+        if count == 0:
+            self._ix_revive(base)
+        key = self._ix_entry_key(base, entity_id)
+        if self._db_storage.get(key) is not None:
+            return
+        self._db_storage.insert(key, entity_id)
+        self._db_storage.insert(f"{base}|c", str(count + 1))
+
+    def _ix_remove(self, base: str, entity_id: str) -> None:
+        self._purge_some()
+        count = self._ix_count(base)
+        if count == 0:
+            return
+        key = self._ix_entry_key(base, entity_id)
+        if self._db_storage.get(key) is None:
+            return
+        self._db_storage.remove(key)
+        if count > 1:
+            self._db_storage.insert(f"{base}|c", str(count - 1))
+        else:
+            self._db_storage.remove(f"{base}|c")
+
+    def _ix_contains(self, base: str, entity_id: str) -> bool:
+        if self._ix_count(base) == 0:
+            return False
+        return self._db_storage.get(self._ix_entry_key(base, entity_id)) is not None
+
+    def _ix_page(self, base: str, from_id: int, count: int) -> List[str]:
+        """Up to ``count`` sequential ids >= ``from_id``, ascending."""
+        if from_id < 1:
+            raise ValueError("from_id must be at least 1")
+        if count < 1:
+            raise ValueError("count must be at least 1")
+        if self._ix_count(base) == 0 or len(str(from_id)) > _ID_WIDTH:
+            return []
+        start = f"{base}|n{str(from_id).zfill(_ID_WIDTH)}"
+        end = f"{base}|n{':' * _ID_WIDTH}"
+        cut = len(base) + 2
+        # A key of another base can fall inside the range only if its suffix
+        # is not all digits (e.g. value "x|n0;..." next to value "x").
+        return [
+            value
+            for key, value in self._scan(start, end, count)
+            if all(c in _DIGITS for c in key[cut:])
+        ]
+
+    def _ix_bucket(
+        self, base: str, tag: str, width: int, top: str, page_size: int = _SCAN_PAGE
+    ):
+        start = f"{base}|{tag}{'0' * width}"
+        end = f"{base}|{tag}{top * width}"
+        cut = len(base) + 2
+        valid = _DIGITS if tag == "n" else _HEX
+        while True:
+            page = self._scan(start, end, page_size)
+            for key, value in page:
+                if all(c in valid for c in key[cut:]):
+                    yield key, value
+            if len(page) < page_size:
+                return
+            # Smallest same-length key after the last one: append the lowest
+            # char and drop the last, i.e. bump by one in the key order.
+            last = page[-1][0]
+            start = last[:-1] + chr(ord(last[-1]) + 1)
+
+    def _ix_all(self, base: str) -> List[str]:
+        """Every id in the set: sequential ids ascending, then the others."""
+        if self._ix_count(base) == 0:
+            return []
+        ids = [v for _, v in self._ix_bucket(base, "n", _ID_WIDTH, ":")]
+        ids.extend(v for _, v in self._ix_bucket(base, "h", _HASH_WIDTH, "g"))
+        return ids
+
+    def _ix_clear(self, base: str) -> None:
+        """Empty a set in O(1); its entries are purged in bounded steps.
+
+        Every reader checks the counter first, so removing it empties the set
+        at once. The entries are queued and removed by later index writes
+        (_PURGE_PER_WRITE each) or by purge_step(). ``{base}|d`` marks the set
+        as dead and holds its queue position, so re-adding to it (a reused
+        custom id) purges the leftovers first instead of reviving them.
+        """
+        if self._ix_count(base) == 0:
+            return
+        storage = self._db_storage
+        tail = int(storage.get(_PQ_TAIL) or 0)
+        storage.insert(self._pq_key(tail), base)
+        storage.insert(_PQ_TAIL, str(tail + 1))
+        storage.insert(f"{base}|d", str(tail))
+        storage.remove(f"{base}|c")
+        self._purge_pending = True
+
+    @staticmethod
+    def _pq_key(position: int) -> str:
+        return f"{_PQ}{str(position).zfill(_ID_WIDTH)}"
+
+    def _ix_drain(self, base: str, limit: int) -> int:
+        """Remove up to ``limit`` entries of ``base``; returns how many."""
+        removed = 0
+        for tag, width, top in _BUCKETS:
+            keys = []
+            page_size = min(limit - removed, _SCAN_PAGE)
+            for key, _ in self._ix_bucket(base, tag, width, top, page_size):
+                if removed + len(keys) >= limit:
+                    break
+                keys.append(key)
+            for key in keys:
+                self._db_storage.remove(key)
+            removed += len(keys)
+            if removed >= limit:
+                break
+        return removed
+
+    def _ix_revive(self, base: str) -> None:
+        """Before reusing a deleted set: purge its leftovers, drop its queue entry."""
+        position = self._db_storage.get(f"{base}|d")
+        if position is None:
+            return
+        while self._ix_drain(base, _SCAN_PAGE) == _SCAN_PAGE:
+            pass
+        self._db_storage.remove(f"{base}|d")
+        queued = self._pq_key(int(position))
+        if self._db_storage.get(queued) is not None:
+            self._db_storage.remove(queued)
+
+    def _purge_some(self) -> None:
+        if self._purge_pending is not False:
+            self.purge_step(_PURGE_PER_WRITE)
+
+    def purge_step(self, limit: int = 500) -> bool:
+        """Remove up to ``limit`` entries of deleted index sets.
+
+        Deleting an entity empties its relation indexes at once; their entries
+        are removed in the background, a few by each later index write. A
+        timer can call this to finish sooner. Returns True when nothing is
+        left to purge.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        storage = self._db_storage
+        head = int(storage.get(_PQ_HEAD) or 0)
+        tail = int(storage.get(_PQ_TAIL) or 0)
+        start, budget = head, limit
+        while head < tail and budget > 0:
+            queued = self._pq_key(head)
+            base = storage.get(queued)
+            removed = self._ix_drain(base, budget) if base is not None else 0
+            if removed == budget:
+                break  # out of budget, maybe not drained yet
+            budget -= removed
+            if base is not None:
+                storage.remove(f"{base}|d")
+                storage.remove(queued)
+            head += 1
+        if head != start:
+            storage.insert(_PQ_HEAD, str(head))
+        self._purge_pending = head < tail
+        return not self._purge_pending
+
     # ── Reverse Index API ──────────────────────────────────────────────────────
     #
     # Reverse indexes allow OneToMany / ManyToMany / inverse-OneToOne relations
     # to be resolved without scanning all child entities.
     #
-    # Key format: _ri:{ParentType}:{parent_id}:{relation_name}
-    # Value: JSON array of child entity IDs, e.g. ["1", "2", "3"]
+    # Base key: _ri:{ParentType}:{parent_id}:{relation_name} (posting list)
 
     def _ri_key(self, parent_type: str, parent_id: str, relation_name: str) -> str:
         return f"_ri:{parent_type}:{parent_id}:{relation_name}"
@@ -507,101 +743,98 @@ class Database:
     def reverse_index_get(
         self, parent_type: str, parent_id: str, relation_name: str
     ) -> List[str]:
-        """Read the reverse index for a parent entity's relation.
+        """All child ids of a parent's relation (O(children); prefer
+        ``reverse_index_page`` for relations that can grow large)."""
+        return self._ix_all(self._ri_key(parent_type, parent_id, relation_name))
 
-        Returns:
-            List of child entity IDs, or empty list if no index exists.
+    def reverse_index_page(
+        self,
+        parent_type: str,
+        parent_id: str,
+        relation_name: str,
+        from_id: int,
+        count: int,
+    ) -> List[str]:
+        """Up to ``count`` sequential child ids >= ``from_id``, ascending.
+
+        Children with custom (non-sequential) ids are not paged; use
+        ``reverse_index_get`` for those.
         """
-        key = self._ri_key(parent_type, parent_id, relation_name)
-        raw = self._db_storage.get(key)
-        if raw:
-            return json.loads(raw)
-        return []
+        return self._ix_page(
+            self._ri_key(parent_type, parent_id, relation_name), from_id, count
+        )
+
+    def reverse_index_count(
+        self, parent_type: str, parent_id: str, relation_name: str
+    ) -> int:
+        """Number of child ids in a parent's relation (one read)."""
+        return self._ix_count(self._ri_key(parent_type, parent_id, relation_name))
+
+    def reverse_index_contains(
+        self, parent_type: str, parent_id: str, relation_name: str, child_id: str
+    ) -> bool:
+        return self._ix_contains(
+            self._ri_key(parent_type, parent_id, relation_name), child_id
+        )
 
     def reverse_index_add(
         self, parent_type: str, parent_id: str, relation_name: str, child_id: str
     ) -> None:
         """Add a child ID to a parent's reverse index."""
-        key = self._ri_key(parent_type, parent_id, relation_name)
-        raw = self._db_storage.get(key)
-        ids = json.loads(raw) if raw else []
-        if child_id not in ids:
-            ids.append(child_id)
-            self._db_storage.insert(key, json.dumps(ids))
+        self._ix_add(self._ri_key(parent_type, parent_id, relation_name), child_id)
 
     def reverse_index_remove(
         self, parent_type: str, parent_id: str, relation_name: str, child_id: str
     ) -> None:
         """Remove a child ID from a parent's reverse index."""
-        key = self._ri_key(parent_type, parent_id, relation_name)
-        raw = self._db_storage.get(key)
-        if not raw:
-            return
-        ids = json.loads(raw)
-        if child_id in ids:
-            ids.remove(child_id)
-            if ids:
-                self._db_storage.insert(key, json.dumps(ids))
-            else:
-                self._db_storage.remove(key)
+        self._ix_remove(self._ri_key(parent_type, parent_id, relation_name), child_id)
 
     def reverse_index_delete(
         self, parent_type: str, parent_id: str, relation_name: str
     ) -> None:
-        """Delete an entire reverse index entry (used when parent is deleted)."""
-        key = self._ri_key(parent_type, parent_id, relation_name)
-        if self._db_storage.get(key) is not None:
-            self._db_storage.remove(key)
+        """Delete a whole reverse index (used when the parent is deleted).
+
+        Costs one removal per child id.
+        """
+        self._ix_clear(self._ri_key(parent_type, parent_id, relation_name))
 
     # ── Field Index API (issue #11) ────────────────────────────────────────────
     #
     # Secondary indexes for scalar properties declared with indexed=True.
     # Allow equality lookups (Entity.find_by) without scanning all entities.
     #
-    # Key format: _fi:{Type}:{field}:{value}
-    # Value: JSON array of entity IDs, e.g. ["1", "2", "3"]
+    # Base key: _fi:{Type}:{field}:{value} (posting list)
 
     def _fi_key(self, type_name: str, field_name: str, value: str) -> str:
         return f"_fi:{type_name}:{field_name}:{value}"
 
     def field_index_get(self, type_name: str, field_name: str, value: str) -> List[str]:
-        """Read the ID list for entities whose ``field_name`` equals ``value``.
+        """All ids of entities whose ``field_name`` equals ``value``
+        (O(matches); prefer ``field_index_page``)."""
+        return self._ix_all(self._fi_key(type_name, field_name, value))
 
-        Returns:
-            List of entity IDs, or empty list if no index entry exists.
-        """
-        key = self._fi_key(type_name, field_name, value)
-        raw = self._db_storage.get(key)
-        if raw:
-            return json.loads(raw)
-        return []
+    def field_index_page(
+        self, type_name: str, field_name: str, value: str, from_id: int, count: int
+    ) -> List[str]:
+        """Up to ``count`` sequential ids >= ``from_id`` whose ``field_name``
+        equals ``value``, ascending. One range read."""
+        return self._ix_page(self._fi_key(type_name, field_name, value), from_id, count)
+
+    def field_index_count(self, type_name: str, field_name: str, value: str) -> int:
+        """Number of entities whose ``field_name`` equals ``value`` (one read)."""
+        return self._ix_count(self._fi_key(type_name, field_name, value))
 
     def field_index_add(
         self, type_name: str, field_name: str, value: str, entity_id: str
     ) -> None:
         """Add an entity ID to the index entry for ``value``."""
-        key = self._fi_key(type_name, field_name, value)
-        raw = self._db_storage.get(key)
-        ids = json.loads(raw) if raw else []
-        if entity_id not in ids:
-            ids.append(entity_id)
-            self._db_storage.insert(key, json.dumps(ids))
+        self._ix_add(self._fi_key(type_name, field_name, value), entity_id)
 
     def field_index_remove(
         self, type_name: str, field_name: str, value: str, entity_id: str
     ) -> None:
         """Remove an entity ID from the index entry for ``value``."""
-        key = self._fi_key(type_name, field_name, value)
-        raw = self._db_storage.get(key)
-        if not raw:
-            return
-        ids = json.loads(raw)
-        if entity_id in ids:
-            ids.remove(entity_id)
-            if ids:
-                self._db_storage.insert(key, json.dumps(ids))
-            else:
-                self._db_storage.remove(key)
+        self._ix_remove(self._fi_key(type_name, field_name, value), entity_id)
 
     # Reverse counters (unidirectional relations)
     # Key format: "_rc:{parent_type}:{parent_id}:{relation_name}"
@@ -620,41 +853,32 @@ class Database:
     ) -> int:
         """Read the reverse counter for a parent entity's relation.
 
-        Falls back to the length of a legacy reverse-index array (from when
-        the relation was bidirectional) if no counter exists yet.
+        Falls back to the size of a legacy reverse index (from when the
+        relation was bidirectional) if no counter exists yet.
         """
         key = self._rc_key(parent_type, parent_id, relation_name)
         raw = self._db_storage.get(key)
         if raw is not None:
             return int(raw)
-        legacy = self._db_storage.get(
-            self._ri_key(parent_type, parent_id, relation_name)
-        )
-        if legacy:
-            return len(json.loads(legacy))
-        return 0
+        return self.reverse_index_count(parent_type, parent_id, relation_name)
 
     def reverse_count_add(
         self, parent_type: str, parent_id: str, relation_name: str, delta: int
     ) -> None:
         """Adjust the reverse counter by delta (never below zero).
 
-        On first write, seeds the counter from a legacy reverse-index array
-        (if present) and drops the array — lazy, exactly-once migration of
-        relations converted from bidirectional to unidirectional.
+        On first write, seeds the counter from a legacy reverse index (if
+        present) and drops it — lazy, exactly-once migration of relations
+        converted from bidirectional to unidirectional.
         """
         key = self._rc_key(parent_type, parent_id, relation_name)
         raw = self._db_storage.get(key)
         if raw is not None:
             current = int(raw)
         else:
-            legacy_key = self._ri_key(parent_type, parent_id, relation_name)
-            legacy = self._db_storage.get(legacy_key)
-            if legacy:
-                current = len(json.loads(legacy))
-                self._db_storage.remove(legacy_key)
-            else:
-                current = 0
+            current = self.reverse_index_count(parent_type, parent_id, relation_name)
+            if current:
+                self.reverse_index_delete(parent_type, parent_id, relation_name)
         self._db_storage.insert(key, str(max(0, current + delta)))
 
     def reverse_count_delete(

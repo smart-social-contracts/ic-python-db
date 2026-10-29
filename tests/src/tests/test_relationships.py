@@ -597,6 +597,92 @@ class TestReverseIndexResolution:
         assert len(employees) == 1
         assert employees[0].name == "OnlyEmployee"
 
+    def test_large_relation_is_one_entry_per_child(self):
+        """Issue #18: a parent with many children never stores a growing value;
+        full reads cross scan pages, paged reads stay ordered, and deleting
+        the parent removes every entry."""
+        db = Database.get_instance()
+        dept = Department(name="Big")
+        for i in range(620):
+            Employee(name=f"E{i}").department = dept
+        ids = db.reverse_index_get(dept._type, dept._id, "employees")
+        assert len(ids) == 620
+        assert ids == sorted(ids, key=int)
+        assert db.reverse_index_count(dept._type, dept._id, "employees") == 620
+        assert all(
+            len(v) < 20 for k, v in db._db_storage.items() if k.startswith("_ri:")
+        )
+        page = db.reverse_index_page(
+            dept._type, dept._id, "employees", int(ids[100]), 3
+        )
+        assert page == ids[100:103]
+
+        dept_type, dept_id = dept._type, dept._id
+        dept.delete()
+        # Empty at once; the entries go in bounded purge steps
+        assert db.reverse_index_count(dept_type, dept_id, "employees") == 0
+        assert db.reverse_index_get(dept_type, dept_id, "employees") == []
+        steps = 0
+        while not db.purge_step(limit=100):
+            steps += 1
+        assert steps >= 6  # 620 entries, 100 per step
+        assert not [
+            k
+            for k in db._db_storage.keys()
+            if k.startswith(f"_ri:{dept_type}:{dept_id}:")
+        ]
+
+    def test_deleted_parent_entries_are_purged_by_later_writes(self):
+        db = Database.get_instance()
+        dept = Department(name="Gone")
+        for i in range(30):
+            Employee(name=f"G{i}").department = dept
+        dept_type, dept_id = dept._type, dept._id
+        dept.delete()
+        other = Department(name="Busy")
+        for i in range(5):  # each index write purges a few entries on the side
+            Employee(name=f"B{i}").department = other
+        assert not [
+            k
+            for k in db._db_storage.keys()
+            if k.startswith(f"_ri:{dept_type}:{dept_id}:")
+        ]
+        assert db.purge_step()
+
+    def test_reused_custom_id_does_not_revive_deleted_children(self):
+        db = Database.get_instance()
+        dept = Department(name="Reused", _id="reused")
+        for i in range(50):  # more than one write purges on the side
+            Employee(name=f"R{i}").department = dept
+        dept.delete()
+        again = Department(name="Reused", _id="reused")
+        newcomer = Employee(name="New")
+        newcomer.department = again
+        assert [e.name for e in again.employees] == ["New"]
+        assert db.purge_step()
+
+    def test_custom_id_children(self):
+        dept = Department(name="Custom")
+        alice = Employee(name="Alice", _id="alice")
+        bob = Employee(name="Bob")
+        alice.department = dept
+        bob.department = dept
+        assert {e.name for e in dept.employees} == {"Alice", "Bob"}
+        alice.department = None
+        assert [e.name for e in dept.employees] == ["Bob"]
+
+    def test_legacy_json_reverse_index_still_reads(self):
+        db = Database.get_instance()
+        dept = Department(name="Old")
+        e1 = Employee(name="A")
+        e2 = Employee(name="B")
+        db._db_storage.insert(
+            f"_ri:{dept._type}:{dept._id}:employees", f'["{e1._id}", "{e2._id}"]'
+        )
+        assert {e.name for e in dept.employees} == {"A", "B"}
+        e1.department = dept  # already present after migration: no double count
+        assert db.reverse_index_count(dept._type, dept._id, "employees") == 2
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestRelationships)

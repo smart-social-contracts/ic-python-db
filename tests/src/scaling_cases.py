@@ -48,10 +48,9 @@ KNOWN = {
     "audit": ("#25", "audit log has no paged read"),
 }
 
-# Known failures only the local suite sees. On main, deleting a parent reads
-# its whole id list (bytes, which the local suite counts) without parsing it
-# (few instructions, so the canister suite sees no growth).
-LOCAL_ONLY_KNOWN = {"delete_parent"}
+# Known failures only the local suite sees (their cost grows in bytes read,
+# not in instructions)
+LOCAL_ONLY_KNOWN = set()
 
 
 # ── Model ───────────────────────────────────────────────────────────────────
@@ -383,7 +382,7 @@ CASES = [
     # Entities of one type
     Case("create_child", BOUNDED, world_owner, op_create_child,
          ["Entity.new", "Database.save", "Database.reverse_index_add",
-          "Database.field_index_add"], known="18"),
+          "Database.field_index_add"]),
     Case("load", BOUNDED, world_items, op_load,
          ["Entity.load", "Database.load"], readonly=True),
     Case("alias", BOUNDED, world_owner, op_alias,
@@ -396,23 +395,23 @@ CASES = [
     Case("page", BOUNDED, world_items, op_page, ["Entity.page"],
          known="instances", readonly=True),
     Case("find_by", BOUNDED, world_items, op_find_by,
-         ["Entity.find_by", "Database.field_index_page"], known="18", readonly=True),
+         ["Entity.find_by", "Database.field_index_page"], readonly=True),
     Case("count_by", BOUNDED, world_items, op_count_by,
-         ["Entity.count_by", "Database.field_index_count"], known="18", readonly=True),
+         ["Entity.count_by", "Database.field_index_count"], readonly=True),
     Case("rebuild_index_batch", BOUNDED, world_items, op_rebuild_index,
-         ["Entity.rebuild_field_index"], known="18"),
+         ["Entity.rebuild_field_index"]),
     Case("update_field", BOUNDED, world_owner, op_update_field, ["Entity._save"]),
     Case("update_indexed", BOUNDED, world_owner, op_update_indexed,
-         ["Database.field_index_remove"], known="18"),
+         ["Database.field_index_remove"]),
     Case("delete_child", BOUNDED, world_owner, op_delete_child,
-         ["Entity.delete", "Database.delete"], known="18"),
+         ["Entity.delete", "Database.delete"]),
     # One-to-many
     Case("parent_get", BOUNDED, world_owner, op_parent_get,
          ["ManyToOne.__get__"], readonly=True),
     Case("reparent", BOUNDED, world_owner, op_reparent,
-         ["ManyToOne.__set__", "Database.reverse_index_remove"], known="18"),
+         ["ManyToOne.__set__", "Database.reverse_index_remove"]),
     Case("delete_parent", BOUNDED, world_owner, op_delete_parent,
-         ["Database.reverse_index_delete"], known="18"),
+         ["Database.reverse_index_delete"]),
     Case("has_children", BOUNDED, world_owner, op_has_children,
          ["RelationView.__bool__"], known="relations", readonly=True),
     Case("count_children", BOUNDED, world_owner, op_count_children,
@@ -431,7 +430,7 @@ CASES = [
     Case("m2m_small_side_get", BOUNDED, world_tag, op_m2m_small_side_get,
          ["ManyToMany.__get__"], readonly=True),
     Case("m2m_add_small_side", BOUNDED, world_tag, op_m2m_add_small_side,
-         ["RelationView.add"], known="18"),
+         ["RelationView.add"]),
     Case("m2m_add_big_side", BOUNDED, world_tag, op_m2m_add_big_side,
          ["RelationView.add"], known="relations"),
     Case("m2m_discard_big_side", BOUNDED, world_tag, op_m2m_discard_big_side,

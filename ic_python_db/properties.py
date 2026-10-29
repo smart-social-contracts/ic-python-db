@@ -373,8 +373,8 @@ class ManyToOne(Relation[E]):
 class OneToMany(Relation[E]):
     """One-to-many relationship (parent side, resolved via reverse index).
 
-    Accessing this property reads the persisted reverse index to find child
-    IDs, then loads each child. No scanning required.
+    Accessing this property returns a RelationView: counting, membership and
+    pages read the persisted reverse index without loading every child.
 
     Example:
         class Department(Entity):
@@ -389,25 +389,10 @@ class OneToMany(Relation[E]):
 
     def __get__(
         self, obj: object, objtype: Optional[type] = None
-    ) -> Union["OneToMany[E]", List[E]]:
+    ) -> Union["OneToMany[E]", "RelationView"]:
         if obj is None:
             return self  # type: ignore[return-value]
-
-        from .db_engine import Database
-
-        db = Database.get_instance()
-        child_ids = db.reverse_index_get(obj._type, obj._id, self.name)
-
-        children = []
-        for child_id in child_ids:
-            for type_name in self._get_allowed_types():
-                entity_class = db._entity_types.get(type_name)
-                if entity_class:
-                    child = entity_class.load(child_id)
-                    if child:
-                        children.append(child)
-                        break
-        return children  # type: ignore[return-value]
+        return RelationView(obj, self)  # type: ignore[return-value]
 
     def __set__(self, obj, values):
         raise AttributeError(
@@ -556,19 +541,154 @@ class OneToOne(Relation[E]):
             obj._save()
 
 
-class ManyToManyList(list):
-    """List subclass returned by ManyToMany.__get__ that supports .add() and .remove()."""
+def _require_unpaged(db, obj, relation_name, action, instead):
+    """Raise TooLargeError before ``action`` loads more members than MAX_UNPAGED."""
+    from . import constants
+    from .errors import TooLargeError
 
-    def __init__(self, items, owner, prop):
-        super().__init__(items)
+    total = db.reverse_index_count(obj._type, obj._id, relation_name)
+    if total > constants.MAX_UNPAGED:
+        owner_type = obj._type.split("::")[-1]
+        raise TooLargeError(
+            f"{owner_type}.{relation_name} has {total} members, more than "
+            f"{constants.MAX_UNPAGED} can be handled in one call; to {action}, {instead}"
+        )
+
+
+class RelationView:
+    """The members of a OneToMany or ManyToMany relation, loaded only on demand.
+
+    Returned by the relation's getter instead of a list (issue #21), so that
+    questions about a large relation stay cheap:
+
+        if section.stands: ...              # one read
+        len(section.stands)                 # one read
+        stand in section.stands             # two reads
+        page, cursor = section.stands.page(1, 50)   # one range read + 50 loads
+        group.members.add(user)             # index writes only, no loads
+
+    Iterating, indexing and comparing load every member and raise
+    TooLargeError past constants.MAX_UNPAGED; use page() for large relations.
+    ``list(view)`` gives a plain list.
+
+    len() and ``in`` count stored references. A unidirectional target deleted
+    elsewhere stays referenced until discarded (no reverse list exists to find
+    its owners); loading skips it.
+    """
+
+    def __init__(self, owner, prop):
         self._owner = owner
         self._prop = prop
 
-    def add(self, entity):
-        """Add an entity to this many-to-many relationship."""
+    def _db(self):
         from .db_engine import Database
+
+        return Database.get_instance()
+
+    def _key(self):
+        return (self._owner._type, self._owner._id, self._prop.name)
+
+    def _load(self, entity_id):
+        db = self._db()
+        for type_name in self._prop._get_allowed_types():
+            entity_class = db._entity_types.get(type_name)
+            if entity_class:
+                entity = entity_class.load(entity_id)
+                if entity:
+                    return entity
+        return None
+
+    def __len__(self):
+        return self._db().reverse_index_count(*self._key())
+
+    def __bool__(self):
+        return len(self) > 0
+
+    def __contains__(self, entity):
         from .entity import Entity
 
+        if isinstance(entity, Entity):
+            try:
+                self._prop.validate_entity(entity)
+            except TypeError:
+                return False
+            entity_id = entity._id
+        else:
+            entity_id = str(entity)
+        return self._db().reverse_index_contains(*self._key(), entity_id)
+
+    def page(self, from_id: int = 1, count: int = 50):
+        """Up to ``count`` members with id >= ``from_id``, in ascending id order.
+
+        Returns (members, next_from_id); next_from_id is None on the last page.
+        Costs one range read and ``count`` loads, however large the relation.
+        Members with custom (non-sequential) ids are not paged.
+        """
+        if count < 1:
+            raise ValueError("count must be at least 1")
+        db = self._db()
+        members = []
+        cursor = from_id
+        while len(members) < count:
+            need = count - len(members)
+            # One extra id tells whether another page exists
+            ids = db.reverse_index_page(*self._key(), cursor, need + 1)
+            for entity_id in ids[:need]:
+                entity = self._load(entity_id)
+                if entity is not None:
+                    members.append(entity)
+            if len(ids) <= need:
+                return members, None
+            cursor = int(ids[need])
+        return members, cursor
+
+    def _all(self):
+        from . import constants
+        from .errors import TooLargeError
+
+        total = len(self)
+        if total > constants.MAX_UNPAGED:
+            owner_type = self._owner._type.split("::")[-1]
+            raise TooLargeError(
+                f"{owner_type}.{self._prop.name} has {total} members, more than "
+                f"{constants.MAX_UNPAGED} can be loaded in one call; use "
+                f".page(from_id, count), len() or 'in' instead"
+            )
+        members = []
+        for entity_id in self._db().reverse_index_get(*self._key()):
+            entity = self._load(entity_id)
+            if entity is not None:
+                members.append(entity)
+        return members
+
+    def __iter__(self):
+        return iter(self._all())
+
+    def __getitem__(self, index):
+        return self._all()[index]
+
+    def __eq__(self, other):
+        if isinstance(other, RelationView):
+            other = other._all()
+        if isinstance(other, (list, tuple)):
+            return self._all() == list(other)
+        return NotImplemented
+
+    def __repr__(self):
+        return f"<RelationView {self._owner._type}@{self._owner._id}.{self._prop.name}>"
+
+    def _require_many_to_many(self, action):
+        if not isinstance(self._prop, ManyToMany):
+            raise TypeError(
+                f"Cannot {action} on OneToMany '{self._prop.name}'. "
+                f"Set the ManyToOne '{self._prop.reverse_name}' on the child instead."
+            )
+
+    def add(self, entity):
+        """Add an entity to this many-to-many relationship."""
+        from .entity import Entity
+
+        self._require_many_to_many("add")
         if isinstance(entity, (str, int)):
             resolved = self._prop.resolve_entity(self._owner, entity)
         elif isinstance(entity, Entity):
@@ -577,14 +697,10 @@ class ManyToManyList(list):
             raise TypeError(f"Cannot add {type(entity)} to ManyToMany relation")
 
         self._prop.validate_entity(resolved)
-        db = Database.get_instance()
+        db = self._db()
 
-        if not db.reverse_index_contains(
-            self._owner._type, self._owner._id, self._prop.name, resolved._id
-        ):
-            db.reverse_index_add(
-                self._owner._type, self._owner._id, self._prop.name, resolved._id
-            )
+        if not db.reverse_index_contains(*self._key(), resolved._id):
+            db.reverse_index_add(*self._key(), resolved._id)
             if self._prop.unidirectional:
                 db.reverse_count_add(
                     resolved._type, resolved._id, self._prop.reverse_name, 1
@@ -598,13 +714,12 @@ class ManyToManyList(list):
                 )
             if not self._owner._do_not_save:
                 self._owner._save()
-        self.append(resolved)
 
     def discard(self, entity):
         """Remove an entity from this many-to-many relationship (no error if absent)."""
-        from .db_engine import Database
         from .entity import Entity
 
+        self._require_many_to_many("discard")
         if isinstance(entity, Entity):
             entity_id = entity._id
             entity_type = entity._type
@@ -612,13 +727,9 @@ class ManyToManyList(list):
             entity_id = str(entity)
             entity_type = None
 
-        db = Database.get_instance()
-        was_present = db.reverse_index_contains(
-            self._owner._type, self._owner._id, self._prop.name, entity_id
-        )
-        db.reverse_index_remove(
-            self._owner._type, self._owner._id, self._prop.name, entity_id
-        )
+        db = self._db()
+        was_present = db.reverse_index_contains(*self._key(), entity_id)
+        db.reverse_index_remove(*self._key(), entity_id)
         if self._prop.unidirectional:
             if was_present:
                 if entity_type is None:
@@ -640,13 +751,16 @@ class ManyToManyList(list):
                     type_name, entity_id, self._prop.reverse_name, self._owner._id
                 )
 
-        self[:] = [e for e in self if getattr(e, "_id", None) != entity_id]
         if not self._owner._do_not_save:
             self._owner._save()
 
     def remove(self, entity):
         """Remove an entity from this many-to-many relationship."""
         self.discard(entity)
+
+
+# Name of the view before 0.13, when it was a list subclass
+ManyToManyList = RelationView
 
 
 class ManyToMany(Relation[E]):
@@ -689,25 +803,10 @@ class ManyToMany(Relation[E]):
 
     def __get__(
         self, obj: object, objtype: Optional[type] = None
-    ) -> Union["ManyToMany[E]", List[E]]:
+    ) -> Union["ManyToMany[E]", "RelationView"]:
         if obj is None:
             return self  # type: ignore[return-value]
-
-        from .db_engine import Database
-
-        db = Database.get_instance()
-        related_ids = db.reverse_index_get(obj._type, obj._id, self.name)
-
-        entities = []
-        for related_id in related_ids:
-            for type_name in self._get_allowed_types():
-                entity_class = db._entity_types.get(type_name)
-                if entity_class:
-                    entity = entity_class.load(related_id)
-                    if entity:
-                        entities.append(entity)
-                        break
-        return ManyToManyList(entities, obj, self)  # type: ignore[return-value]
+        return RelationView(obj, self)  # type: ignore[return-value]
 
     def __set__(self, obj, values):
         from .db_engine import Database
@@ -729,6 +828,7 @@ class ManyToMany(Relation[E]):
             resolved.append(entity)
 
         db = Database.get_instance()
+        _require_unpaged(db, obj, self.name, "set it", "use .add() and .discard()")
 
         # Remove old relations from both sides' indexes
         old_ids = db.reverse_index_get(obj._type, obj._id, self.name)

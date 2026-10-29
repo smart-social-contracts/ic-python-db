@@ -180,7 +180,29 @@ while cursor is not None:
 
 The rebuild is idempotent. The `indexed` flag is not part of the schema descriptor, so toggling it never triggers upgrade-compatibility errors.
 
-Note: each distinct value's ID list is stored in a single storage entry, so extremely hot values are bounded by the backing store's `max_value_size` — the same constraint as relationship reverse indexes.
+Each matching id is its own storage entry, so a value can match any number of entities without reaching the backing store's `max_value_size`.
+
+## Large Relations
+
+`OneToMany` and `ManyToMany` getters return a `RelationView`, not a list. Questions about the relation and single pages never load every member, so they stay cheap however large it grows:
+
+```python
+if section.stands: ...                       # one read
+len(section.stands)                          # one read
+stand in section.stands                      # two reads
+stands, cursor = section.stands.page(1, 50)  # one range read + 50 loads
+group.members.add(user)                      # index writes only
+```
+
+Iterating, indexing and comparing still work, but they load every member, so past `constants.MAX_UNPAGED` (1,000) they raise `TooLargeError` instead of running into the IC instruction limit. Walk a large relation with `page()`, across calls if needed:
+
+```python
+cursor = 1
+while cursor is not None:
+    stands, cursor = section.stands.page(cursor, 50)
+```
+
+`list(view)` gives a plain list. Deleting a parent is O(1): its index entries are purged in bounded steps by later writes, or by `Database.get_instance().purge_step()` from a timer.
 
 ## Namespaces
 

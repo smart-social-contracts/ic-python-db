@@ -13,6 +13,7 @@ from tests import (
     test_mixins,
     test_namespaces,
     test_properties,
+    test_relation_view,
     test_relationships,
     test_scaling,
     test_serialization,

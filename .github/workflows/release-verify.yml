@@ -1,0 +1,48 @@
+name: Verify release signature
+
+# Runs when a signed draft is published (sign-release.sh publishes it). The
+# checksum file must carry a valid signature by the release key, and every
+# asset must match it; only then are those exact files uploaded to PyPI.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to check
+        required: true
+
+jobs:
+  verify:
+    permissions:
+      contents: write
+    uses: smart-social-contracts/.github/.github/workflows/verify-release.yml@main
+    with:
+      tag: ${{ github.event.release.tag_name || inputs.tag }}
+      fingerprint: 6B7B038DEB77849F1F615E67CA38831314D6AA09
+      revert_on_failure: ${{ github.event_name == 'release' }}
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Download the verified files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D dist -p '*.whl' -p '*.tar.gz'
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine check dist/*
+          twine upload --skip-existing dist/*

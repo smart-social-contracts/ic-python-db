@@ -1,84 +1,83 @@
 name: Create new release
 
+# Bumps the version, builds the wheel and sdist, and attaches them with a
+# checksum file to a *draft* release. Nothing reaches PyPI from here: the
+# draft is signed with the release key (sign-release.sh in
+# smart-social-contracts/.github), and release-verify.yml then checks the
+# signature and uploads exactly the signed files.
+
 on:
-  workflow_run:
-    workflows: ["Test", "Test IC"]
-    types:
-      - completed
-    branches: [main]
-  workflow_dispatch:  # Allows manual triggering without restrictions
+  workflow_dispatch:
     inputs:
       release_type:
         description: 'Type of release (patch, minor, major)'
-        required: false
+        required: true
         default: 'patch'
         type: choice
         options:
           - patch
           - minor
           - major
-      create_github_release:
-        description: 'Create GitHub Release'
-        required: false
-        default: true
-        type: boolean
 
 jobs:
-  deploy:
-    # Only run if the workflow_run event was successful or if it's a manual dispatch
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+  release:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    
+
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install build setuptools wheel bumpversion
-    
-    # Only perform version bump if release_type is provided
+        pip install build twine bumpversion
+
     - name: Bump version
-      if: ${{ github.event.inputs.release_type != '' }}
       id: bump_version
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        # Run bumpversion to update version in files
-        bumpversion ${{ github.event.inputs.release_type }}
-        # Extract and verify the new version from setup.py
+        bumpversion ${{ inputs.release_type }}
         NEW_VERSION=$(grep -Po '(?<=version="|version=\")[^"]*' setup.py)
-        # Also get version from .bumpversion.cfg to verify they match
         BUMP_VERSION=$(grep -Po '(?<=current_version = )[^\s]*' .bumpversion.cfg)
-        # Make sure versions match
         if [ "$NEW_VERSION" != "$BUMP_VERSION" ]; then
           echo "ERROR: Version mismatch between setup.py ($NEW_VERSION) and .bumpversion.cfg ($BUMP_VERSION)"
           exit 1
         fi
         echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
-        echo "New version: $NEW_VERSION"
-    
-    # Only push changes if we did a version bump
-    - name: Push changes
-      if: ${{ github.event.inputs.release_type != '' }}
+
+    - name: Build package
+      run: |
+        python -m build
+        twine check dist/*
+
+    - name: Compute checksums
+      run: |
+        cd dist
+        echo "# SHA-256 checksums for release assets" > ../checksums.txt
+        sha256sum * >> ../checksums.txt
+        cat ../checksums.txt
+
+    - name: Push the version bump
       run: |
         git push origin
         git push origin --tags
-    
-    # Only create a GitHub release if we did a version bump and the user requested it
-    - name: Create Release
-      if: ${{ github.event.inputs.release_type != '' && github.event.inputs.create_github_release == 'true' }}
-      uses: softprops/action-gh-release@v1
+
+    - name: Create draft release
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: v${{ steps.bump_version.outputs.NEW_VERSION }}
         name: Release v${{ steps.bump_version.outputs.NEW_VERSION }}
         generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Stays a draft until the checksum file is signed with the release key
+        draft: true
+        files: |
+          dist/*
+          checksums.txt

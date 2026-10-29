@@ -397,7 +397,7 @@ CASES = [
     Case("load_some", BOUNDED, world_items, op_load_some,
          ["Entity.load_some", "Database.load_page"], readonly=True),
     Case("page", BOUNDED, world_items, op_page, ["Entity.page"],
-         known="instances", readonly=True),
+         readonly=True),
     Case("find_by", BOUNDED, world_items, op_find_by,
          ["Entity.find_by", "Database.field_index_page"], readonly=True),
     Case("count_by", BOUNDED, world_items, op_count_by,
@@ -465,9 +465,9 @@ CASES = [
          ["OneToOne.__set__"]),
     # Whole type
     Case("instances", GUARDED, world_items, op_instances,
-         ["Entity.instances"], known="instances", readonly=True),
+         ["Entity.instances"], readonly=True),
     Case("find", GUARDED, world_items, op_find,
-         ["Entity.find"], known="instances", readonly=True),
+         ["Entity.find"], readonly=True),
     # Whole database
     Case("dump_json", ADMIN, None, None, ["Database.dump_json"],
          known="19", alt="Database.dump_page"),

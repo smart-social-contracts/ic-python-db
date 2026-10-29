@@ -11,7 +11,7 @@ A lightweight key-value database with entity relationships and audit logging cap
 ## Features
 
 - **Persistent Storage**: Works with StableBTreeMap stable structure for persistent storage on your canister's stable memory so your data persists automatically across canister upgrades.
-- **Range-based paging**: `load_some`, `find`, `instances` and `rebuild_field_index` read a page of entities with a single ordered `range` call on the stable map (Basilisk `StableBTreeMap.range`), so cost tracks the rows returned rather than the highest id ever issued, and deleted ids are free. Backends without `range` (older CDK builds, plain dict test doubles) transparently fall back to one read per id.
+- **Range-based paging**: `page`, `load_some` and `rebuild_field_index` read a page of entities with a single ordered `range` call on the stable map (Basilisk `StableBTreeMap.range`), so cost tracks the rows returned rather than the highest id ever issued, and deleted ids are free. Backends without `range` (older CDK builds, plain dict test doubles) transparently fall back to one read per id. `instances()` and `find()` load a whole type: they are deprecated and raise `TooLargeError` past 1,000 entities (use `count()`, `find_by()` or `page()`).
 - **Entity-Relational Database**: Create, read and write entities with OneToOne, OneToMany, ManyToOne, and ManyToMany relationships.
 - **Schema Versioning & Upgrade Safety**: Automatic schema introspection, compatibility checking, and auto-migration for safe changes. Breaking changes without a `migrate()` method are rejected, preventing data corruption on canister upgrades.
 - **Entity Hooks**: Intercept and control entity lifecycle events (create, modify, delete) with `on_event` hooks.
@@ -114,11 +114,12 @@ Then use the defined entities to store objects:
 
     assert Person.count() == 3
     assert Person.max_id() == 4
-    assert Person.instances() == [john, alice, eva]
 
-    # Cursor-based pagination
-    assert Person.load_some(0, 2) == [john, alice]
-    assert Person.load_some(2, 2) == [eva]
+    # Cursor-based pagination: (page, next_from_id), None on the last page
+    page, cursor = Person.page(1, 2)
+    assert page == [john, alice]
+    page, cursor = Person.page(cursor, 2)
+    assert page == [eva] and cursor is None
 
     # Retrieve database contents in JSON format
     print(Database.get_instance().dump_json(pretty=True))

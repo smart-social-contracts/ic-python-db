@@ -458,11 +458,41 @@ class Entity:
         return entity
 
     @classmethod
+    def _require_unpaged(cls, method: str) -> None:
+        """Raise TooLargeError before ``method`` loads more than MAX_UNPAGED entities."""
+        from . import constants
+        from .errors import TooLargeError
+
+        total = cls.count()
+        if total > constants.MAX_UNPAGED:
+            raise TooLargeError(
+                f"{cls.__name__}.{method}() would load all {total} entities, more "
+                f"than {constants.MAX_UNPAGED} in one call; use {cls.__name__}.count(), "
+                f"{cls.__name__}.find_by() on an indexed field, or "
+                f"{cls.__name__}.page(from_id, count) instead"
+            )
+
+    @classmethod
     def find(cls: Type[T], d) -> List[T]:
         """Find entities matching a dictionary filter.
 
-        Uses load_some over the full ID range. Prefer indexed lookups where possible.
+        .. deprecated::
+            Loads every entity of the type to filter them, and raises
+            TooLargeError past constants.MAX_UNPAGED. Use find_by() on an
+            indexed field, or page() (issue #22).
         """
+        try:
+            import warnings
+
+            warnings.warn(
+                "Entity.find() is deprecated and will be removed. "
+                "Use find_by() on an indexed field, or page().",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        except (ImportError, AttributeError):
+            pass
+        cls._require_unpaged("find")
         max_id = cls.max_id()
         if max_id == 0:
             return []
@@ -612,8 +642,9 @@ class Entity:
         """Get all instances of this entity type, including subclass instances.
 
         .. deprecated::
-            This method loads ALL entities and is O(max_id). Prefer load_some()
-            with pagination or use relationship accessors.
+            Loads every entity, and raises TooLargeError past
+            constants.MAX_UNPAGED. Use count(), find_by() on an indexed field,
+            or page() (issue #22).
 
         Returns:
             List of entities
@@ -623,7 +654,7 @@ class Entity:
 
             warnings.warn(
                 "Entity.instances() is deprecated and will be removed. "
-                "Use load_some() with pagination instead.",
+                "Use count(), find_by() or page() instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -632,6 +663,7 @@ class Entity:
         db = Database.get_instance()
         full_type_name = cls.get_full_type_name()
         db.register_entity_type(cls, full_type_name)
+        cls._require_unpaged("instances")
 
         max_id = cls.max_id()
         if max_id == 0:
@@ -652,6 +684,44 @@ class Entity:
                     instances.extend(type_cls.load_some(1, subclass_max_id))
 
         return instances
+
+    @classmethod
+    def page(
+        cls: Type[T], from_id: int = 1, count: int = 50
+    ) -> Tuple[List[T], Optional[int]]:
+        """One page of this type's entities, in ascending id order (issue #22).
+
+        Returns (entities, next_from_id); next_from_id is None on the last page.
+        Costs one range read plus ``count`` loads, however many entities
+        exist, so it replaces instances() for large types::
+
+            cursor = 1
+            while cursor is not None:
+                users, cursor = User.page(cursor, 50)
+
+        Only this type's own entities (not subclasses'), with canonical
+        sequential ids, as with load_some(). Entities that fail to load are
+        skipped, so a page may hold fewer than ``count``.
+        """
+        if from_id < 1:
+            raise ValueError("from_id must be at least 1")
+        if count < 1:
+            raise ValueError("count must be at least 1")
+        db = cls.db()
+        type_name = cls.get_full_type_name()
+        # One extra row tells whether another page exists
+        rows = db.load_page(type_name, from_id, count + 1)
+        entities: List[T] = []
+        for entity_id, data in rows[:count]:
+            try:
+                entity = db.get_entity(type_name, entity_id)
+                if entity is None:
+                    entity = cls._hydrate(entity_id, data)
+                entities.append(entity)
+            except (ValueError, AttributeError) as e:
+                logger.warning(f"Skipping {cls.__name__}@{entity_id}: {e}")
+        next_from_id = int(rows[count][0]) if len(rows) > count else None
+        return entities, next_from_id
 
     @classmethod
     def count(cls: Type[T]) -> int:

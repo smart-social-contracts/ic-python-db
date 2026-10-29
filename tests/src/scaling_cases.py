@@ -343,6 +343,10 @@ def op_iterate_children(w):
     list(_owner(w).items)
 
 
+def op_index_children(w):
+    _owner(w).items[0]
+
+
 def op_m2m_list_big_side(w):
     list(_tag(w).owners)
 
@@ -413,38 +417,40 @@ CASES = [
     Case("delete_parent", BOUNDED, world_owner, op_delete_parent,
          ["Database.reverse_index_delete"]),
     Case("has_children", BOUNDED, world_owner, op_has_children,
-         ["RelationView.__bool__"], known="relations", readonly=True),
+         ["RelationView.__bool__"], readonly=True),
     Case("count_children", BOUNDED, world_owner, op_count_children,
          ["RelationView.__len__", "Database.reverse_index_count"],
-         known="relations", readonly=True),
+         readonly=True),
     Case("contains_child", BOUNDED, world_owner, op_contains_child,
          ["RelationView.__contains__", "Database.reverse_index_contains"],
-         known="relations", readonly=True),
+         readonly=True),
     Case("page_children", BOUNDED, world_owner, op_page_children,
          ["RelationView.page", "Database.reverse_index_page"],
-         known="relations", readonly=True),
+         readonly=True),
     Case("iterate_children", GUARDED, world_owner, op_iterate_children,
          ["OneToMany.__get__", "RelationView.__iter__", "Database.reverse_index_get"],
-         known="relations", readonly=True),
+         readonly=True),
+    Case("index_children", GUARDED, world_owner, op_index_children,
+         ["RelationView.__getitem__"], readonly=True),
     # Many-to-many
     Case("m2m_small_side_get", BOUNDED, world_tag, op_m2m_small_side_get,
          ["ManyToMany.__get__"], readonly=True),
     Case("m2m_add_small_side", BOUNDED, world_tag, op_m2m_add_small_side,
          ["RelationView.add"]),
     Case("m2m_add_big_side", BOUNDED, world_tag, op_m2m_add_big_side,
-         ["RelationView.add"], known="relations"),
+         ["RelationView.add"]),
     Case("m2m_discard_big_side", BOUNDED, world_tag, op_m2m_discard_big_side,
-         ["RelationView.discard", "RelationView.remove"], known="relations"),
+         ["RelationView.discard", "RelationView.remove"]),
     Case("m2m_contains", BOUNDED, world_tag, op_m2m_contains,
-         ["RelationView.__contains__"], known="relations", readonly=True),
+         ["RelationView.__contains__"], readonly=True),
     Case("m2m_list_big_side", GUARDED, world_tag, op_m2m_list_big_side,
-         ["RelationView.__iter__"], known="relations", readonly=True),
+         ["RelationView.__iter__"], readonly=True),
     Case("m2m_set_big_side", GUARDED, world_tag, op_m2m_set_big_side,
-         ["ManyToMany.__set__"], known="relations"),
+         ["ManyToMany.__set__"]),
     Case("serialize_big_m2m", GUARDED, world_tag, op_serialize_big_m2m,
-         ["Entity.serialize"], known="relations", readonly=True),
+         ["Entity.serialize"], readonly=True),
     Case("delete_big_m2m", GUARDED, world_tag, op_delete_big_m2m,
-         ["Entity.delete"], known="relations"),
+         ["Entity.delete"]),
     # Unidirectional many-to-many
     Case("uni_add", BOUNDED, world_badge, op_uni_add,
          ["Database.reverse_count_add"]),

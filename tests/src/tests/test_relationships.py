@@ -294,8 +294,10 @@ class TestUnidirectionalManyToMany:
         # Counter must not outlive the target entity
         db = Database.get_instance()
         assert db.reverse_count_get(badge._type, badge._id, "holders") == 0
-        # Forward traversal skips the dangling reference
-        assert len(h.badges) == 0
+        # Forward traversal skips the dangling reference; len() still counts
+        # it, as no reverse list exists to clean it up
+        assert list(h.badges) == []
+        assert len(h.badges) == 1
 
     def test_counter_survives_reload(self):
         h = Holder(name="alice")

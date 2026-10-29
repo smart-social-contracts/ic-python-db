@@ -749,7 +749,13 @@ class Entity:
         logger.debug(f"Deleting entity {self._type}@{self._id}")
         from .constants import ACTION_DELETE
         from .hooks import call_entity_hook
-        from .properties import ManyToMany, ManyToOne, OneToMany, OneToOne
+        from .properties import (
+            ManyToMany,
+            ManyToOne,
+            OneToMany,
+            OneToOne,
+            _require_unpaged,
+        )
 
         # Call hook before deletion
         allow, _ = call_entity_hook(self, None, self, None, ACTION_DELETE)
@@ -758,6 +764,18 @@ class Entity:
             raise PermissionError("Hook rejected entity deletion")
 
         db = self.db()
+
+        # Refuse before changing anything: each ManyToMany member is updated
+        for cls in reversed(self.__class__.__mro__):
+            for attr_name, attr_value in cls.__dict__.items():
+                if not attr_name.startswith("_") and isinstance(attr_value, ManyToMany):
+                    _require_unpaged(
+                        db,
+                        self,
+                        attr_name,
+                        "delete it",
+                        f"first .discard() its {attr_name} page by page",
+                    )
 
         # Clean up reverse indexes for all relation properties
         for cls in reversed(self.__class__.__mro__):
@@ -963,7 +981,12 @@ class Entity:
         """
         data = self._serialize_base()
 
-        from ic_python_db.properties import ManyToMany, ManyToOne, OneToOne
+        from ic_python_db.properties import (
+            ManyToMany,
+            ManyToOne,
+            OneToOne,
+            _require_unpaged,
+        )
 
         db = self.db()
 
@@ -984,6 +1007,13 @@ class Entity:
                             ref, attr_value._get_allowed_types()
                         )
                 elif isinstance(attr_value, ManyToMany):
+                    _require_unpaged(
+                        db,
+                        self,
+                        attr_name,
+                        "serialize it",
+                        f"serialize its {attr_name} with .page()",
+                    )
                     related_ids = db.reverse_index_get(self._type, self._id, attr_name)
                     if related_ids:
                         data[attr_name] = [

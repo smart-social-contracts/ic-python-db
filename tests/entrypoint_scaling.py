@@ -84,6 +84,23 @@ def check(case):
     return large <= small * FACTOR + SLACK, detail
 
 
+def check_heap():
+    """Entities loaded by earlier calls must not stay in the heap (#23)."""
+    _, error = call("start", "load")
+    for lo in range(0, N_LARGE, CHUNK):
+        if error:
+            break
+        _, error = call("add", f"{lo}:{min(N_LARGE, lo + CHUNK)}")
+    size, error = (None, error) if error else call("registry_size", "")
+    passed = not error and size <= CHUNK
+    color = GREEN if passed else RED
+    detail = error or f"{size} entities still held after {N_LARGE} were created"
+    print(
+        f"{color}{'ok' if passed else 'FAIL':34}{RESET} {'heap_between_calls':24} {detail}"
+    )
+    return passed
+
+
 def main():
     cases = [c for c in sc.CASES if c.kind in (sc.BOUNDED, sc.GUARDED)]
     if len(sys.argv) > 1:
@@ -105,6 +122,8 @@ def main():
             status, color = "FAIL", RED
             unexpected += 1
         print(f"{color}{status:34}{RESET} {case.name:24} {detail}", flush=True)
+    if len(sys.argv) == 1 or "heap_between_calls" in sys.argv[1:]:
+        unexpected += 0 if check_heap() else 1
     print(f"\n{unexpected} unexpected result(s)")
     return 1 if unexpected else 0
 

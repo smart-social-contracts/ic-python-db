@@ -42,6 +42,7 @@ class Property(Generic[T]):
     default: Optional[T]
     validator: Optional[Callable[[T], bool]]
     indexed: bool
+    sorted: bool
 
     def __init__(
         self,
@@ -50,12 +51,14 @@ class Property(Generic[T]):
         default: Optional[T] = None,
         validator: Optional[Callable[[T], bool]] = None,
         indexed: bool = False,
+        sorted: bool = False,
     ):
         self.name = name
         self.type = type
         self.default = default
         self.validator = validator
         self.indexed = indexed
+        self.sorted = sorted
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
@@ -121,6 +124,9 @@ class Property(Generic[T]):
             if value is not None:
                 db.field_index_add(obj._type, self.name, str(value), obj._id)
 
+        if old_value != value and obj._id is not None and hasattr(obj, "_sync_sorted"):
+            obj._sync_sorted(self.name)
+
         obj._save()
 
 
@@ -155,6 +161,7 @@ class Integer(Property[int]):
         max_value: Optional[int] = None,
         default: Optional[int] = None,
         indexed: bool = False,
+        sorted: bool = False,
     ):
         def validator(value: int) -> bool:
             if min_value is not None and value < min_value:
@@ -164,7 +171,12 @@ class Integer(Property[int]):
             return True
 
         super().__init__(
-            name="", type=int, default=default, validator=validator, indexed=indexed
+            name="",
+            type=int,
+            default=default,
+            validator=validator,
+            indexed=indexed,
+            sorted=sorted,
         )
 
 
@@ -177,6 +189,7 @@ class Float(Property[float]):
         max_value: Optional[float] = None,
         default: Optional[float] = None,
         indexed: bool = False,
+        sorted: bool = False,
     ):
         def validator(value: float) -> bool:
             if min_value is not None and value < min_value:
@@ -186,7 +199,12 @@ class Float(Property[float]):
             return True
 
         super().__init__(
-            name="", type=float, default=default, validator=validator, indexed=indexed
+            name="",
+            type=float,
+            default=default,
+            validator=validator,
+            indexed=indexed,
+            sorted=sorted,
         )
 
 

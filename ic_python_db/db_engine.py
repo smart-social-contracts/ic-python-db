@@ -30,6 +30,11 @@ _PQ_HEAD = "_pq:head"
 _PQ_TAIL = "_pq:tail"
 # Entries of deleted sets each index write removes on the side
 _PURGE_PER_WRITE = 20
+# Sorted indexes (see "Sorted indexes" below): each field's value is encoded
+# in _SORT_WIDTH decimal digits, an entity id in _SORT_ID_WIDTH characters
+_SORT_WIDTH = 20
+_SORT_ID_WIDTH = 13
+_INVERT = str.maketrans("0123456789", "9876543210")
 
 
 def _is_sequential_id(id_str: str) -> bool:
@@ -854,6 +859,81 @@ class Database:
     ) -> None:
         """Remove an entity ID from the index entry for ``value``."""
         self._ix_remove(self._fi_key(type_name, field_name, value), entity_id)
+
+    # ── Sorted indexes ─────────────────────────────────────────────────────────
+    #
+    # A sorted index keeps one entry per entity whose key starts with the
+    # entity's sort values, so the storage's own key order is the sort order
+    # and a "top N" is one range read:
+    #
+    #   _si:{Type}:{fields}:a|{values}{id}  -> entity id   lowest first
+    #   _si:{Type}:{fields}:d|{values}{id}  -> entity id   highest first
+    #   _sb:{Type}:{fields}:{entity id}     -> {values}    what is indexed now
+    #
+    # {values} is each field's value as _SORT_WIDTH digits (Entity encodes
+    # them), {id} the id in _SORT_ID_WIDTH characters. Every key of one index
+    # and direction has the same length, which keeps them contiguous in key
+    # order (storage_sort_key). The "d" entry stores every digit inverted, so
+    # ascending key order is descending value order; ties go to the higher id.
+    #
+    # The back pointer (_sb) lets an update or a rebuild remove the stale
+    # entry without knowing the old value, so an index survives data
+    # migrations and type changes.
+
+    def _si_prefix(self, type_name: str, index: str, descending: bool) -> str:
+        return f"_si:{type_name}:{index}:{'d' if descending else 'a'}|"
+
+    @staticmethod
+    def _si_id(entity_id: str, descending: bool) -> str:
+        if _is_sequential_id(entity_id) and len(entity_id) < _SORT_ID_WIDTH:
+            digits = entity_id.zfill(_SORT_ID_WIDTH - 1)
+            return "n" + (digits.translate(_INVERT) if descending else digits)
+        digest = hashlib.sha256(entity_id.encode("utf-8")).hexdigest()
+        return "h" + digest[: _SORT_ID_WIDTH - 1]
+
+    def sorted_index_set(
+        self, type_name: str, index: str, entity_id: str, values: Optional[str]
+    ) -> None:
+        """Index ``entity_id`` under ``values`` (encoded sort values), or drop
+        it when ``values`` is None. A no-op when nothing changed."""
+        back = f"_sb:{type_name}:{index}:{entity_id}"
+        old = self._db_storage.get(back)
+        if old == values:
+            return
+        storage = self._db_storage
+        for descending in (False, True):
+            prefix = self._si_prefix(type_name, index, descending)
+            ident = self._si_id(entity_id, descending)
+            if old is not None:
+                key = prefix + (old.translate(_INVERT) if descending else old) + ident
+                if storage.get(key) is not None:
+                    storage.remove(key)
+            if values is not None:
+                key = prefix + (values.translate(_INVERT) if descending else values)
+                storage.insert(key + ident, entity_id)
+        if values is None:
+            storage.remove(back)
+        else:
+            storage.insert(back, values)
+
+    def sorted_index_scan(
+        self,
+        type_name: str,
+        index: str,
+        fields: int,
+        descending: bool,
+        start: Optional[str],
+        limit: int,
+    ) -> List[Tuple[str, str]]:
+        """Up to ``limit`` (key, entity id) pairs of an index in sort order,
+        from key ``start`` (inclusive; None for the first)."""
+        prefix = self._si_prefix(type_name, index, descending)
+        width = _SORT_WIDTH * fields + _SORT_ID_WIDTH
+        if start is None:
+            start = prefix + "0" * width
+        elif not start.startswith(prefix) or len(start) != len(prefix) + width:
+            raise ValueError("cursor does not belong to this sorted index")
+        return self._scan(start, prefix + "~" * width, limit)
 
     # Reverse counters (unidirectional relations)
     # Key format: "_rc:{parent_type}:{parent_id}:{relation_name}"

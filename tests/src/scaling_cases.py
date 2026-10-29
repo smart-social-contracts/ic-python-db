@@ -20,7 +20,9 @@ Kept free of typing/dataclasses: this module also runs inside a canister.
 """
 
 from ic_python_db import (
+    Boolean,
     Entity,
+    Float,
     Integer,
     ManyToMany,
     ManyToOne,
@@ -101,7 +103,26 @@ class ScVersioned(Entity):
     rank = Integer()
 
 
-MODEL = [ScOwner, ScItem, ScTag, ScViewer, ScBadge, ScPerson, ScCard, ScVersioned]
+class ScScore(Entity):
+    name = String()
+    points = Integer(sorted=True)
+    likes = Integer(sorted=True)
+    at = Float(sorted=True)
+    visible = Boolean()
+    __sorted_indexes__ = [("points", "likes")]
+
+
+MODEL = [
+    ScOwner,
+    ScItem,
+    ScTag,
+    ScViewer,
+    ScBadge,
+    ScPerson,
+    ScCard,
+    ScVersioned,
+    ScScore,
+]
 
 
 def cold():
@@ -184,11 +205,18 @@ def _pairs_add(w, i):
     w["mid"] = str(i // 2 + 1)
 
 
+def _scores_add(w, i):
+    """Scores with repeating values, half of them visible."""
+    ScScore(name=f"s{i}", points=i % 97, likes=i % 13, at=float(i), visible=i % 2 == 0)
+    w["mid"] = str(i // 2 + 1)
+
+
 world_items = World(lambda: {"mid": "1"}, _items_add)
 world_owner = World(_owner_start, _owner_add)
 world_tag = World(_tag_start, _tag_add)
 world_badge = World(_badge_start, _badge_add)
 world_pairs = World(lambda: {"mid": "1"}, _pairs_add)
+world_scores = World(lambda: {"mid": "1"}, _scores_add)
 
 
 # ── Operations ──────────────────────────────────────────────────────────────
@@ -331,6 +359,40 @@ def op_one_to_one_set(w):
     ScPerson.load(w["mid"]).card = ScCard(number=-1)
 
 
+def op_sorted_update(w):
+    ScScore.load(w["mid"]).points += 1
+
+
+def op_sorted_create(w):
+    ScScore(name="new", points=50, likes=5, at=-1.0, visible=True)
+
+
+def op_sorted_delete(w):
+    ScScore.load(w["mid"]).delete()
+
+
+def op_top_by(w):
+    assert len(ScScore.top_by("points", count=20)[0]) == 20
+
+
+def op_top_by_composite(w):
+    assert len(ScScore.top_by(("points", "likes"), count=20)[0]) == 20
+
+
+def op_top_by_ascending_page_2(w):
+    _, cursor = ScScore.top_by("at", count=20, descending=False)
+    assert len(ScScore.top_by("at", count=20, descending=False, cursor=cursor)[0]) == 20
+
+
+def op_top_by_where(w):
+    page, _ = ScScore.top_by("points", count=10, where=lambda e: e.visible)
+    assert len(page) == 10
+
+
+def op_rebuild_sorted_batch(w):
+    ScScore.rebuild_sorted_index(from_id=1, batch=50)
+
+
 def op_instances(w):
     ScItem.instances()
 
@@ -463,6 +525,21 @@ CASES = [
          ["OneToOne.__get__"], readonly=True),
     Case("one_to_one_set", BOUNDED, world_pairs, op_one_to_one_set,
          ["OneToOne.__set__"]),
+    # Sorted indexes
+    Case("sorted_update", BOUNDED, world_scores, op_sorted_update,
+         ["Database.sorted_index_set"]),
+    Case("sorted_create", BOUNDED, world_scores, op_sorted_create, ["Entity.new"]),
+    Case("sorted_delete", BOUNDED, world_scores, op_sorted_delete, ["Entity.delete"]),
+    Case("top_by", BOUNDED, world_scores, op_top_by,
+         ["Entity.top_by", "Database.sorted_index_scan"], readonly=True),
+    Case("top_by_composite", BOUNDED, world_scores, op_top_by_composite,
+         ["Entity.top_by"], readonly=True),
+    Case("top_by_ascending_page_2", BOUNDED, world_scores, op_top_by_ascending_page_2,
+         ["Entity.top_by"], readonly=True),
+    Case("top_by_where", BOUNDED, world_scores, op_top_by_where,
+         ["Entity.top_by"], readonly=True),
+    Case("rebuild_sorted_batch", BOUNDED, world_scores, op_rebuild_sorted_batch,
+         ["Entity.rebuild_sorted_index"]),
     # Whole type
     Case("instances", GUARDED, world_items, op_instances,
          ["Entity.instances"], readonly=True),

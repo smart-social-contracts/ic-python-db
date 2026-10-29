@@ -4,12 +4,14 @@ Core database engine implementation
 
 import hashlib
 import json
+import sys
 import time
 import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
 from ic_python_logging import get_logger
 
+from ._cdk import ic
 from .storage import MemoryStorage, Storage, storage_sort_key, supports_range
 
 logger = get_logger(__name__)
@@ -57,6 +59,17 @@ def _next_sequential_id(id_str: str, digits: int) -> Optional[int]:
     if len(candidate) > digits:
         return None
     return max(int(candidate), 10 ** (digits - 1))
+
+
+def _message_time() -> Optional[int]:
+    """The IC's time, which is the same throughout one message; None outside
+    a canister, where the identity map's weak references do the job."""
+    if sys.platform != "wasi" or ic is None:
+        return None
+    try:
+        return ic.time()
+    except Exception:
+        return None
 
 
 class Database:
@@ -113,6 +126,9 @@ class Database:
         # Identity map: {(type_name, entity_id): entity}. Weak, so an entity
         # lives only as long as some caller holds it, and its entry goes with it.
         self._entity_registry = weakref.WeakValueDictionary()
+        # In a canister weakref is a stub that holds strong references, so the
+        # map is also emptied when a new message starts (see _registry)
+        self._registry_time: Optional[int] = None
         # Whether deleted index sets may still have entries to purge (None:
         # not checked yet). Kept in the heap: a query discards it with its writes.
         self._purge_pending = None
@@ -166,14 +182,28 @@ class Database:
         self._db_audit.insert("_min_id", "0")
         self._db_audit.insert("_max_id", "0")
 
+    def _registry(self):
+        """The identity map, emptied when a new message starts.
+
+        ic.time() is constant within one message, so a new value means the
+        previous message is over: its entities are dropped from the map
+        instead of piling up until the next upgrade. An entity some code
+        still holds stays usable, but loading its id gives a new instance.
+        """
+        now = _message_time()
+        if now is not None and now != self._registry_time:
+            self._entity_registry.clear()
+            self._registry_time = now
+        return self._entity_registry
+
     def register_entity(self, entity_instance):
         """Register an entity instance in the identity map."""
         key = (entity_instance._type, entity_instance._id)
-        self._entity_registry[key] = entity_instance
+        self._registry()[key] = entity_instance
 
     def get_entity(self, type_name: str, entity_id: str):
         """Get entity from registry if it exists."""
-        return self._entity_registry.get((type_name, entity_id))
+        return self._registry().get((type_name, entity_id))
 
     def clear_registry(self):
         """Clear the entity registry (useful for testing)."""
@@ -181,7 +211,7 @@ class Database:
 
     def unregister_entity(self, type_name: str, entity_id: str):
         """Remove an entity from the registry (used when deleting)."""
-        self._entity_registry.pop((type_name, entity_id), None)
+        self._registry().pop((type_name, entity_id), None)
 
     def _audit(self, op: str, key: str, data: Any) -> None:
         if self._db_audit and self._audit_enabled:

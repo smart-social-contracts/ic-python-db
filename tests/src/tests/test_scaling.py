@@ -39,6 +39,10 @@ class TestScaling:
             case.world.add(world, i)
         return 0
 
+    def registry_size(self, _unused: str = None):
+        """Entities in the identity map as seen by a new message."""
+        return len(Database.get_instance()._registry())
+
     def measure(self, _unused: str = None):
         """Instructions the case's operation uses, or ERROR / TOO_LARGE."""
         case, world = _current["case"], _current["world"]

@@ -5,6 +5,7 @@ IC Python DB - A lightweight key-value database with entity relationships and au
 from .constants import ACTION_CREATE, ACTION_DELETE, ACTION_MODIFY
 from .db_engine import Database
 from .entity import Entity
+from .errors import TooLargeError
 from .mixins import TimestampedMixin
 from .properties import (
     Boolean,
@@ -14,6 +15,7 @@ from .properties import (
     ManyToOne,
     OneToMany,
     OneToOne,
+    RelationView,
     String,
 )
 from .schema import SchemaIncompatibleError, build_schema, diff_schemas, schema_hash
@@ -40,6 +42,8 @@ __all__ = [
     "ACTION_MODIFY",
     "ACTION_DELETE",
     "SchemaIncompatibleError",
+    "TooLargeError",
+    "RelationView",
     "build_schema",
     "diff_schemas",
     "schema_hash",

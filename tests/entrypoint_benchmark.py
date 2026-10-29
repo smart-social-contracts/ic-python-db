@@ -26,6 +26,10 @@ OPERATIONS = [
     "deserialize_existing_level3",
     "bulk_deserialize_level1",
     "bulk_deserialize_level3",
+    "index_add",
+    "index_remove",
+    "index_count",
+    "index_page_50",
 ]
 
 GREEN = "\033[92m"

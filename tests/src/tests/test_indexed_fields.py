@@ -183,6 +183,129 @@ class TestIndexedFields:
     def test_rebuild_empty_type_returns_none(self):
         assert Ticket.rebuild_field_index("status") is None
 
+    # ── Posting-list storage (issue #18) ─────────────────────────────────────
+
+    def test_no_stored_value_grows_with_matches(self):
+        db = Database.get_instance()
+        for i in range(300):
+            Ticket(title=f"T{i}", status="open")
+        longest = max(len(v) for k, v in db._db_storage.items() if k.startswith("_fi:"))
+        assert longest < 20
+        assert Ticket.count_by("status", "open") == 300
+
+    def test_large_set_pages_in_order(self):
+        for i in range(1200):
+            Ticket(title=f"T{i}", status="open" if i % 3 else "closed")
+        collected = []
+        cursor = 1
+        while cursor is not None:
+            entities, cursor = Ticket.find_by(
+                "status", "open", from_id=cursor, count=97
+            )
+            collected.extend(int(e._id) for e in entities)
+        expected = [i + 1 for i in range(1200) if i % 3]
+        assert collected == expected
+        assert Ticket.count_by("status", "open") == len(expected)
+        assert len(
+            Database.get_instance().field_index_get("Ticket", "status", "open")
+        ) == len(expected)
+
+    def test_ids_across_digit_counts_stay_ordered(self):
+        db = Database.get_instance()
+        for entity_id in ("9", "10", "99", "100", "1000"):
+            db.field_index_add("Ticket", "status", "open", entity_id)
+        assert db.field_index_page("Ticket", "status", "open", 1, 10) == [
+            "9",
+            "10",
+            "99",
+            "100",
+            "1000",
+        ]
+        assert db.field_index_page("Ticket", "status", "open", 50, 2) == ["99", "100"]
+
+    def test_add_and_remove_are_idempotent(self):
+        db = Database.get_instance()
+        db.field_index_add("Ticket", "status", "open", "5")
+        db.field_index_add("Ticket", "status", "open", "5")
+        assert db.field_index_count("Ticket", "status", "open") == 1
+        db.field_index_remove("Ticket", "status", "open", "6")
+        assert db.field_index_count("Ticket", "status", "open") == 1
+        db.field_index_remove("Ticket", "status", "open", "5")
+        db.field_index_remove("Ticket", "status", "open", "5")
+        assert db.field_index_count("Ticket", "status", "open") == 0
+        assert not [k for k in db._db_storage.keys() if k.startswith("_fi:")]
+
+    def test_custom_ids_are_counted_but_not_paged(self):
+        db = Database.get_instance()
+        for entity_id in ("abc", "007", "1234567890123", "4"):
+            db.field_index_add("Ticket", "status", "open", entity_id)
+        assert db.field_index_count("Ticket", "status", "open") == 4
+        assert db.field_index_page("Ticket", "status", "open", 1, 10) == ["4"]
+        assert sorted(db.field_index_get("Ticket", "status", "open")) == sorted(
+            ["abc", "007", "1234567890123", "4"]
+        )
+        db.field_index_remove("Ticket", "status", "open", "abc")
+        assert "abc" not in db.field_index_get("Ticket", "status", "open")
+
+    def test_neighbouring_values_do_not_leak(self):
+        db = Database.get_instance()
+        db.field_index_add("Ticket", "status", "x", "1")
+        # Same key length as x's entries, and inside x's range bytewise
+        db.field_index_add("Ticket", "status", "x|n0;abcdefgh", "2")
+        db.field_index_add("Ticket", "status", "x|n", "3")
+        assert db.field_index_page("Ticket", "status", "x", 1, 10) == ["1"]
+        assert db.field_index_get("Ticket", "status", "x") == ["1"]
+
+    def test_legacy_json_list_is_migrated_on_first_touch(self):
+        db = Database.get_instance()
+        db._db_storage.insert("_fi:Ticket:status:open", '["3", "1", "2"]')
+        assert db.field_index_count("Ticket", "status", "open") == 3
+        assert db._db_storage.get("_fi:Ticket:status:open") is None
+        db.field_index_add("Ticket", "status", "open", "4")
+        assert db.field_index_page("Ticket", "status", "open", 1, 10) == [
+            "1",
+            "2",
+            "3",
+            "4",
+        ]
+
+    def test_works_without_range(self):
+        from ic_python_db.storage import Storage
+
+        class ProbeOnlyStorage(Storage):
+            def __init__(self):
+                self._data = {}
+
+            def insert(self, key, value):
+                self._data[key] = value
+
+            def get(self, key):
+                return self._data.get(key)
+
+            def remove(self, key):
+                del self._data[key]
+
+            def items(self):
+                return iter(self._data.items())
+
+            def __contains__(self, key):
+                return key in self._data
+
+            def keys(self):
+                return iter(self._data.keys())
+
+        db = Database.get_instance()
+        original = db._db_storage
+        try:
+            db._db_storage = ProbeOnlyStorage()
+            ids = [Ticket(title=f"T{i}", status="open")._id for i in range(12)]
+            entities, cursor = Ticket.find_by("status", "open", count=5)
+            assert [e._id for e in entities] == ids[:5]
+            assert cursor == int(ids[5])
+            assert Ticket.count_by("status", "open") == 12
+        finally:
+            db._db_storage = original
+
 
 def run(test_name: str = None, test_var: str = None):
     Database.get_instance().clear()

@@ -30,6 +30,21 @@ class BenchLand(Entity):
     zones = OneToMany("BenchZone", "land")
 
 
+class BenchVote(Entity):
+    proposal = String(indexed=True)
+
+
+# Index benchmarks put this many ids under one value per db_size unit
+INDEX_SCALE = 20
+
+
+def _seed_index(n):
+    """Put ids 1..n under BenchVote.proposal = "P-40"."""
+    db = Database.get_instance()
+    for i in range(1, n + 1):
+        db.field_index_add("BenchVote", "proposal", "P-40", str(i))
+
+
 def _measure(func):
     """Measure instruction cost of a callable."""
     before = ic.performance_counter(0)
@@ -128,6 +143,52 @@ class TestBenchmark:
         Database.get_instance().clear_registry()
         cost, _ = _measure(lambda: BenchZone.instances())
         ic.print(f"BENCH_RESULT:instances_sparse:{count}:{cost}")
+        return cost
+
+    def index_add(self, count: str):
+        """Add one id to an index value already holding count*INDEX_SCALE ids."""
+        self._clear()
+        n = int(count) * INDEX_SCALE
+        _seed_index(n)
+        db = Database.get_instance()
+        cost, _ = _measure(
+            lambda: db.field_index_add("BenchVote", "proposal", "P-40", str(n + 1))
+        )
+        ic.print(f"BENCH_RESULT:index_add:{count}:{cost}")
+        return cost
+
+    def index_remove(self, count: str):
+        """Remove the first id from an index value holding count*INDEX_SCALE ids."""
+        self._clear()
+        n = int(count) * INDEX_SCALE
+        _seed_index(max(n, 1))
+        db = Database.get_instance()
+        cost, _ = _measure(
+            lambda: db.field_index_remove("BenchVote", "proposal", "P-40", "1")
+        )
+        ic.print(f"BENCH_RESULT:index_remove:{count}:{cost}")
+        return cost
+
+    def index_count(self, count: str):
+        """count_by on an index value holding count*INDEX_SCALE ids."""
+        self._clear()
+        _seed_index(int(count) * INDEX_SCALE)
+        cost, _ = _measure(lambda: BenchVote.count_by("proposal", "P-40"))
+        ic.print(f"BENCH_RESULT:index_count:{count}:{cost}")
+        return cost
+
+    def index_page_50(self, count: str):
+        """Read the 50 ids after the midpoint of a count*INDEX_SCALE-id value."""
+        self._clear()
+        n = int(count) * INDEX_SCALE
+        _seed_index(n)
+        db = Database.get_instance()
+        cost, _ = _measure(
+            lambda: db.field_index_page(
+                "BenchVote", "proposal", "P-40", max(n // 2, 1), 50
+            )
+        )
+        ic.print(f"BENCH_RESULT:index_page_50:{count}:{cost}")
         return cost
 
     def deserialize_new_level1(self, count: str):

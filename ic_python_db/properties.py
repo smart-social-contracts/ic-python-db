@@ -579,10 +579,9 @@ class ManyToManyList(list):
         self._prop.validate_entity(resolved)
         db = Database.get_instance()
 
-        existing = db.reverse_index_get(
-            self._owner._type, self._owner._id, self._prop.name
-        )
-        if resolved._id not in existing:
+        if not db.reverse_index_contains(
+            self._owner._type, self._owner._id, self._prop.name, resolved._id
+        ):
             db.reverse_index_add(
                 self._owner._type, self._owner._id, self._prop.name, resolved._id
             )
@@ -614,8 +613,8 @@ class ManyToManyList(list):
             entity_type = None
 
         db = Database.get_instance()
-        was_present = entity_id in db.reverse_index_get(
-            self._owner._type, self._owner._id, self._prop.name
+        was_present = db.reverse_index_contains(
+            self._owner._type, self._owner._id, self._prop.name, entity_id
         )
         db.reverse_index_remove(
             self._owner._type, self._owner._id, self._prop.name, entity_id

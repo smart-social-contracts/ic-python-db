@@ -80,7 +80,7 @@ class Entity:
                            Entities with namespaces are stored as "namespace::ClassName"
                            Allows multiple entities with same class name in different namespaces
         _entity_type (str): Optional entity type for subclasses
-        _context (Set[Entity]): Set of all entities in current context
+        _context (Set[Entity]): Unused, kept empty for compatibility (issue #23)
 
     Property Storage:
         User-defined properties (String, Integer, etc.) are stored as _prop_{name}
@@ -89,7 +89,10 @@ class Entity:
     """
 
     _entity_type = None  # To be defined in subclasses
-    _context: Set["Entity"] = set()  # Set of entities in current context
+    # Used to hold every entity ever constructed, which kept them all in the
+    # heap until the next upgrade (issue #23). Kept, empty, for code that
+    # clears it.
+    _context: Set["Entity"] = set()
     _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
     __version__ = 1  # Default schema version
@@ -159,9 +162,6 @@ class Entity:
         self._id = None if kwargs.get("_id") is None else kwargs["_id"]
         self._loaded = False if kwargs.get("_loaded") is None else kwargs["_loaded"]
         self._counted = False  # Track if this entity has been counted
-
-        # Add to context
-        self.__class__._context.add(self)
 
         # Register this type with the database (using full type name)
         self.db().register_entity_type(self.__class__, self._type)
@@ -970,9 +970,6 @@ class Entity:
                     db.delete(self._alias_key(), alias_value)
 
         logger.debug(f"Deleted entity {self._type}@{self._id}")
-
-        # Remove from context
-        self.__class__._context.discard(self)
 
     def _serialize_base(self) -> Dict[str, Any]:
         """Shared serialization logic: core data, properties, and instance attributes."""

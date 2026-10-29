@@ -110,8 +110,9 @@ class Database:
             )
 
         self._entity_types = {}
-        # Entity registry: {(type_name, entity_id): weakref to entity instance}
-        self._entity_registry = {}
+        # Identity map: {(type_name, entity_id): entity}. Weak, so an entity
+        # lives only as long as some caller holds it, and its entry goes with it.
+        self._entity_registry = weakref.WeakValueDictionary()
         # Whether deleted index sets may still have entries to purge (None:
         # not checked yet). Kept in the heap: a query discards it with its writes.
         self._purge_pending = None
@@ -168,21 +169,11 @@ class Database:
     def register_entity(self, entity_instance):
         """Register an entity instance in the identity map."""
         key = (entity_instance._type, entity_instance._id)
-        # Use weak reference to allow garbage collection
-        self._entity_registry[key] = weakref.ref(entity_instance)
+        self._entity_registry[key] = entity_instance
 
     def get_entity(self, type_name: str, entity_id: str):
         """Get entity from registry if it exists."""
-        key = (type_name, entity_id)
-        if key in self._entity_registry:
-            entity_ref = self._entity_registry[key]
-            entity = entity_ref()  # Get object from weak reference
-            if entity is not None:
-                return entity
-            else:
-                # Clean up dead reference
-                del self._entity_registry[key]
-        return None
+        return self._entity_registry.get((type_name, entity_id))
 
     def clear_registry(self):
         """Clear the entity registry (useful for testing)."""
@@ -190,9 +181,7 @@ class Database:
 
     def unregister_entity(self, type_name: str, entity_id: str):
         """Remove an entity from the registry (used when deleting)."""
-        key = (type_name, entity_id)
-        if key in self._entity_registry:
-            del self._entity_registry[key]
+        self._entity_registry.pop((type_name, entity_id), None)
 
     def _audit(self, op: str, key: str, data: Any) -> None:
         if self._db_audit and self._audit_enabled:

@@ -349,6 +349,175 @@ class TestUnidirectionalManyToMany:
         assert rel.get("unidirectional") is True
 
 
+class RcBadge(Entity):
+    """Target of unidirectional ManyToMany relations from several classes."""
+
+    name = String()
+
+
+class RcMixin:
+    mixed = ManyToMany("RcBadge", "mixed_holders", unidirectional=True)
+
+
+class RcBase(Entity):
+    endorsements = ManyToMany("RcBadge", "endorsers", unidirectional=True)
+
+
+class RcDerived(RcBase):
+    name = String()
+
+
+class RcHidden(RcBase):
+    """Hides the relation it inherits."""
+
+    endorsements = String()
+
+
+class RcOwner(RcMixin, Entity):
+    name = String()
+    # Several targets, one of them its own class
+    badges = ManyToMany(["RcBadge", "RcOwner"], "holders", unidirectional=True)
+    friends = ManyToMany("RcOwner", "friends")  # bidirectional: no counter
+
+
+class RcLateTarget(Entity):
+    """Target of the classes the tests below define, which stay registered."""
+
+    name = String()
+
+
+class RcNsBadge(Entity):
+    __namespace__ = "rcns"
+    name = String()
+
+
+class RcNsOwner(Entity):
+    __namespace__ = "rcowners"
+    name = String()
+    qualified = ManyToMany("rcns::RcNsBadge", "qualified_holders", unidirectional=True)
+    plain = ManyToMany("RcNsBadge", "plain_holders", unidirectional=True)
+
+
+def _scanned_counter_names(db, type_name):
+    """What Entity.delete found, before reverse_count_names, by reading every
+    attribute of every registered class: the oracle for reverse_count_names."""
+    short = type_name.split("::")[-1]
+    names = set()
+    for entity_class in set(db._entity_types.values()):
+        for cls in reversed(entity_class.__mro__):
+            for attr_name, attr in cls.__dict__.items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr, ManyToMany) and attr.unidirectional:
+                    if short in [t.split("::")[-1] for t in attr._get_allowed_types()]:
+                        names.add(attr.reverse_name)
+    return sorted(names)
+
+
+def _counter_keys(entity):
+    return [
+        k
+        for k in Database.get_instance()._db_storage.keys()
+        if k.startswith(f"_rc:{entity._type}:{entity._id}:")
+    ]
+
+
+class TestReverseCountNames:
+    """Entity.delete reads the counters it must delete from a cache of the
+    registered classes, which must follow every change to the registry."""
+
+    def setUp(self):
+        Database.get_instance().clear()
+
+    def test_names_match_a_scan_of_every_registered_type(self):
+        db = Database.get_instance()
+        for type_name in sorted(db._entity_types):
+            assert sorted(db.reverse_count_names(type_name)) == _scanned_counter_names(
+                db, type_name
+            ), type_name
+
+    def test_every_way_to_declare_a_counter_is_found(self):
+        db = Database.get_instance()
+        # own class, base class, mixin; the hidden and bidirectional ones add nothing
+        assert sorted(db.reverse_count_names("RcBadge")) == [
+            "endorsers",
+            "holders",
+            "mixed_holders",
+        ]
+        assert db.reverse_count_names("RcOwner") == ["holders"]  # self-reference
+        # Relations name their target with or without the namespace
+        for type_name in ("rcns::RcNsBadge", "RcNsBadge"):
+            assert sorted(db.reverse_count_names(type_name)) == [
+                "plain_holders",
+                "qualified_holders",
+            ]
+        assert db.reverse_count_names("RcDerived") == []
+        assert db.reverse_count_names("NoSuchType") == []
+
+    def test_delete_clears_the_counters_of_every_declaring_class(self):
+        badge = RcBadge(name="gold")
+        RcOwner(name="a").badges.add(badge)
+        RcOwner(name="b").mixed.add(badge)
+        RcDerived(name="c").endorsements.add(badge)
+        RcHidden().endorsements = "no relation"
+        assert len(_counter_keys(badge)) == 3
+
+        badge.delete()
+
+        assert _counter_keys(badge) == []
+
+    def test_delete_clears_the_counter_of_a_self_reference(self):
+        a, b = RcOwner(name="a"), RcOwner(name="b")
+        a.badges.add(b)
+        assert len(_counter_keys(b)) == 1
+
+        b.delete()
+
+        assert _counter_keys(b) == []
+
+    def test_delete_clears_the_counters_of_a_namespaced_type(self):
+        badge = RcNsBadge(name="gold")
+        owner = RcNsOwner(name="a")
+        owner.qualified.add(badge)
+        owner.plain.add(badge)
+        assert len(_counter_keys(badge)) == 2
+
+        badge.delete()
+
+        assert _counter_keys(badge) == []
+
+    def test_a_type_registered_after_the_cache_was_built_is_counted(self):
+        db = Database.get_instance()
+        db.reverse_count_names("RcLateTarget")  # builds the cache
+
+        class RcLate(Entity):
+            targets = ManyToMany("RcLateTarget", "late_holders", unidirectional=True)
+
+        assert "late_holders" in db.reverse_count_names("RcLateTarget")
+        target, late = RcLateTarget(name="t"), RcLate()
+        late.targets.add(target)
+        assert len(_counter_keys(target)) == 1
+
+        target.delete()
+
+        assert _counter_keys(target) == []
+
+    def test_a_replaced_class_is_no_longer_counted(self):
+        db = Database.get_instance()
+
+        class RcReplaced(Entity):
+            targets = ManyToMany(
+                "RcLateTarget", "replaced_holders", unidirectional=True
+            )
+
+        assert "replaced_holders" in db.reverse_count_names("RcLateTarget")
+
+        class RcReplaced(Entity):  # noqa: F811 - the same name, as after a reload
+            name = String()
+
+        assert "replaced_holders" not in db.reverse_count_names("RcLateTarget")
+
+
 class BaseParent(Entity):
     """Base entity with a OneToMany relationship."""
 
@@ -697,7 +866,9 @@ def run(test_name: str = None, test_var: str = None):
     results4 = tester4.run_tests()
     tester5 = Tester(TestUnidirectionalManyToMany)
     results5 = tester5.run_tests()
-    return results or results2 or results3 or results4 or results5
+    tester6 = Tester(TestReverseCountNames)
+    results6 = tester6.run_tests()
+    return results or results2 or results3 or results4 or results5 or results6
 
 
 if __name__ == "__main__":

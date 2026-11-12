@@ -1129,29 +1129,8 @@ class Entity:
         # via unidirectional ManyToMany relations targeting our type. Their
         # forward indexes may retain a dangling ID (skipped on load); the
         # counter itself must not outlive us.
-        seen_classes = set()
-        for entity_class in db._entity_types.values():
-            if entity_class in seen_classes or not isinstance(entity_class, type):
-                continue
-            seen_classes.add(entity_class)
-            for cls in reversed(entity_class.__mro__):
-                for attr_name, attr_value in cls.__dict__.items():
-                    if attr_name.startswith("_"):
-                        continue
-                    if isinstance(attr_value, ManyToMany) and attr_value.unidirectional:
-                        my_short = (
-                            self._type.split("::")[-1]
-                            if "::" in self._type
-                            else self._type
-                        )
-                        targets = [
-                            t.split("::")[-1] if "::" in t else t
-                            for t in attr_value._get_allowed_types()
-                        ]
-                        if my_short in targets:
-                            db.reverse_count_delete(
-                                self._type, self._id, attr_value.reverse_name
-                            )
+        for reverse_name in db.reverse_count_names(self._type):
+            db.reverse_count_delete(self._type, self._id, reverse_name)
 
         # Remove from field indexes (issue #11)
         for field_name in self._indexed_properties():

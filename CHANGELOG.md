@@ -15,13 +15,13 @@
 
 ### Added
 
-- `Database.repair_field_indexes(after="", limit=500)`: walks the field-index entries of values with a `|`, in bounded calls, moves old entries to their present key and removes those whose entity is gone or has another value.
+- `Database.repair_field_indexes(after="", limit=500)`: walks the field-index keys (of any length), in bounded calls. For values with a `|` it moves old entries to their present key, removes those whose entity is gone or has another value, and converts a list a release before 0.13 stored as one array.
 - `Entity.rebuild_field_indexes(from_id, batch)`: `rebuild_field_index` for every indexed field of a type at once. `rebuild_field_index` moves old entries too.
 
 ### Upgrading from 0.14
 
 1. Upgrade. Nothing is wrong meanwhile: values without a `|` are untouched, and those with one are read under both keys.
-2. Run `Database.repair_field_indexes` until it returns `None` (calls of `limit` keys; about 40 thousand instructions a key). This moves every old entry, custom ids included. Correctness does not wait for it; it is what lets a later release drop the old-key reads.
+2. Run `Database.repair_field_indexes` until it returns `None` (calls of `limit` keys; about 40 thousand instructions a key, and about 245 thousand an id of an old-form list, which is converted whole). This moves every old entry, custom ids included, and converts old-form lists of values with a `|`; nothing needs to run before it (`rebuild_field_indexes` is optional). Correctness does not wait for it; it is what lets a later release drop the old-key reads, once it has run to its end. It leaves what it cannot judge: entries of a type or field the code does not index, entries whose row has no such field, and an old-form list of a value that ends like `|h` and 24 hex digits (it cannot be told from the entry of a custom id; no call reads or converts it).
 3. A realm that escapes its own values before indexing them (realms-gos tags: `%` as `%25`, `|` as `%7C`) holds no `|`: its keys do not change. It can keep doing so.
 
 ### Rolling back to a release before 0.15, and upgrading again

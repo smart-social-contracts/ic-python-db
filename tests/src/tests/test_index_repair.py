@@ -8,6 +8,7 @@ real thing.
 (No ``re`` here: Basilisk's ``re`` is an empty module.)
 """
 
+import json
 import random
 
 from tester import Tester
@@ -356,6 +357,81 @@ class TestIndexRepair:
         before = _storage(db)
         _repair(db)
         assert _storage(db) == before
+
+    def test_repair_converts_an_old_list_of_a_value_with_a_bar_and_moves_it(self):
+        # A release before 0.13 stored the ids of a value as one array under
+        # its key, and the entity of the last id is gone
+        db = Database.get_instance()
+        a, b = IrNote(dept="a|b", kind=""), IrNote(dept="a|b", kind="")
+        custom = IrNote(_id="abc", dept="a|b", kind="")
+        elsewhere = IrNote(dept="c", kind="")
+        for key in [k for k in _storage(db) if k.startswith("_fx:IrNote:dept:a%7Cb")]:
+            db._db_storage.remove(key)
+        ids = [a._id, b._id, custom._id, elsewhere._id, "99"]
+        db._db_storage.insert("_fi:IrNote:dept:a|b", json.dumps(ids))
+        _repair(db)
+        assert db._db_storage.get("_fi:IrNote:dept:a|b") is None
+        assert not _old_keys_left(db)
+        truth = {i: {"dept": "a|b", "kind": ""} for i in (a._id, b._id, "abc")}
+        truth[elsewhere._id] = {"dept": "c", "kind": ""}
+        _check(truth, ["a|b", "c", ""])
+        with WithoutOldKeys():
+            _check(truth, ["a|b", "c", ""])
+
+    def test_repair_does_not_start_converting_a_list_it_has_no_room_for(self):
+        db = Database.get_instance()
+        ids = [str(i) for i in range(1, 11)]
+        db._db_storage.insert("_fi:IrNote:dept:a|b", json.dumps(ids))
+        for junk in ("|", "|c", "|d"):  # shorter keys, so walked first
+            db._db_storage.insert(f"_fi:IrNote:dept:{junk}", "1")
+        cursor = db.repair_field_indexes("", 4)  # 3 keys, then a list of 10
+        assert cursor is not None
+        assert db._db_storage.get("_fi:IrNote:dept:a|b") is not None
+        cursor = db.repair_field_indexes(cursor, 4)  # first in its call: converted
+        assert db._db_storage.get("_fi:IrNote:dept:a|b") is None
+        _repair(db, 4)  # no entity has the value: its entries go
+        assert db.field_index_count("IrNote", "dept", "a|b") == 0
+        assert not [k for k in _storage(db) if k.endswith(("|c", "|d")) and "a|b" in k]
+
+    def test_repair_leaves_an_old_list_of_a_value_without_a_bar(self):
+        # Converting those is up to the first read of the value
+        db = Database.get_instance()
+        db._db_storage.insert("_fi:IrNote:dept:plain", '["1", "2"]')
+        before = _storage(db)
+        _repair(db)
+        assert _storage(db) == before
+        assert (
+            db.field_index_count("IrNote", "dept", "plain") == 2
+        )  # a read converts it
+
+    def test_repair_leaves_an_old_list_that_looks_like_the_entry_of_a_custom_id(self):
+        db = Database.get_instance()
+        key = "_fi:IrNote:dept:a|h" + "0123456789abcdef01234567"
+        db._db_storage.insert(key, '["1"]')
+        before = _storage(db)
+        _repair(db)
+        assert _storage(db) == before
+
+    def test_repair_reaches_a_key_longer_than_256_bytes(self):
+        from ic_python_db.storage import MemoryStorage
+
+        db = Database.get_instance()
+        original, value = db._db_storage, "q|" + "y" * 290
+        try:
+            db._db_storage = MemoryStorage()  # a realm's map takes any length
+            with AsTheReleaseBefore():
+                notes = [IrNote(dept=value, kind="") for _ in range(3)]
+            assert [k for k in db._db_storage.keys() if len(k) > 256]
+            assert db._ix_count("_fi:IrNote:dept:" + value) == 3
+            _repair(db)
+            assert not _old_keys_left(db)
+            with WithoutOldKeys():
+                assert db.field_index_count("IrNote", "dept", value) == 3
+                found = db.field_index_get("IrNote", "dept", value)
+                assert found == [n._id for n in notes]
+        finally:
+            db._db_storage = original
+            Entity._context.clear()
 
     # ── A rollback to the release before, and the upgrade again ──────────────
 

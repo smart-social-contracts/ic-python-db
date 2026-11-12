@@ -22,6 +22,10 @@ _HEX = frozenset("0123456789abcdef")
 _ID_WIDTH = 12
 _HASH_WIDTH = 24
 _SCAN_PAGE = 500
+# Field-index key families repair_field_indexes walks, and the longest key it
+# visits (see "Repairing field indexes")
+_FI_FAMILIES = ("_fi:", "_fx:")
+_REPAIR_MAX_KEY = 256
 _BUCKETS = (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g"))
 # Purge queue of deleted index sets (see _ix_clear): fixed-width positions
 # keep its entries contiguous in key order
@@ -55,6 +59,41 @@ def _escape_key_text(text: str) -> str:
     what keeps two texts from sharing a result (``a|`` and ``a%7C``).
     """
     return text.replace("%", "%25").replace("|", "%7C")
+
+
+def _unescape_key_text(text: str) -> str:
+    """The text ``_escape_key_text`` was given."""
+    return text.replace("%7C", "|").replace("%25", "%")
+
+
+def _entry_base(key: str) -> Optional[str]:
+    """The base a posting-list entry key belongs to; None for any other key
+    (a count, a mark, an old list)."""
+    tail = key[-_ID_WIDTH:]
+    if key.endswith("|n" + tail) and all(c in _DIGITS for c in tail):
+        return key[: -_ID_WIDTH - 2]
+    if _is_hash_entry_key(key):
+        return key[: -_HASH_WIDTH - 2]
+    return None
+
+
+def _index_ranges(after: str):
+    """The (start, end) key ranges that hold field-index keys, in the order
+    repair_field_indexes walks them, from the one that holds ``after``.
+
+    Storage orders keys by length first, so each length of each family is a
+    range of its own.
+    """
+    here = (
+        (_FI_FAMILIES.index(after[:4]), len(after.encode("utf-8"))) if after else (0, 0)
+    )
+    for number, family in enumerate(_FI_FAMILIES):
+        for length in range(len(family) + 1, _REPAIR_MAX_KEY + 1):
+            if (number, length) < here:
+                continue
+            fill = "\x00" * (length - len(family))
+            start = after if (number, length) == here else family + fill
+            yield start, family[:-1] + chr(ord(family[-1]) + 1) + fill
 
 
 def _listing_order(entity_id: str) -> Tuple[int, int]:
@@ -588,10 +627,12 @@ class Database:
     #
     # A base that holds a "|" can make keys of its own that look like another
     # base's entries (base "a|n0000000000" has the key "a|n0000000000|c", as
-    # long as the entries "a|n000000000100"). Bases made of text a caller
-    # chooses must not hold one (see _fi_key); and a range read skips any key
-    # that is not an entry of its base and goes on, so what is left of such
-    # keys cannot hide an entry (see _ix_bucket).
+    # long as the entries "a|n000000000100"). A field index never has one (see
+    # _fi_key). A reverse index base, _ri:{Type}:{parent id}:{relation}, is
+    # not escaped, and a custom parent id may hold a "|": but the relation name
+    # ends the base, so a look-alike has to end with it as well, which is
+    # rarely possible. Either way a range read does not depend on it: it skips
+    # any key that is not an entry of its base and goes on (see _ix_bucket).
     #
     # Before 0.13 a base key held the whole set as one JSON array, which hit
     # the value-size limit at ~10k ids. Such an array is converted to entries
@@ -706,17 +747,20 @@ class Database:
         end = f"{base}|{tag}{top * width}"
         cut = len(base) + 2
         valid = _DIGITS if tag == "n" else _HEX
+        last = None
         while True:
-            page = self._scan(start, end, page_size)
+            # A range starts at its last key, which is read twice: one more
+            # than a page. (No "next key" is computed: the successor of a
+            # char can be longer in utf-8, so the key after it is not the
+            # same length.)
+            wanted = page_size if last is None else page_size + 1
+            page = self._scan(start, end, wanted)
             for key, value in page:
-                if all(c in valid for c in key[cut:]):
+                if key != last and all(c in valid for c in key[cut:]):
                     yield key, value
-            if len(page) < page_size:
+            if len(page) < wanted:
                 return
-            # Smallest same-length key after the last one: append the lowest
-            # char and drop the last, i.e. bump by one in the key order.
-            last = page[-1][0]
-            start = last[:-1] + chr(ord(last[-1]) + 1)
+            last = start = page[-1][0]
 
     def _ix_all(self, base: str) -> List[str]:
         """Every id in the set: sequential ids ascending, then the others."""
@@ -888,21 +932,22 @@ class Database:
     # Base key: _fi:{Type}:{field}:{value} (posting list)
     #
     # A value is text a caller chooses, so its base must not hold a "|" (see
-    # "Posting lists"). One that holds "|" or "%" goes under _fx instead, with
-    # both written as %7C and %25: _fx:{Type}:{field}:{escaped value}. Every
-    # other value keeps the key it always had, so nothing moved for them.
+    # "Posting lists"). One that holds a "|" goes under _fx instead, with "|"
+    # and "%" written as %7C and %25 (so that no two values share an escaped
+    # form): _fx:{Type}:{field}:{escaped value}. Every other value, "%" alone
+    # included, keeps the key it always had, so nothing moved for them.
     #
     # Such a value used to be filed under _fi with no escape. Its entries stay
     # readable there: each call below also looks at the old key of a value that
     # has one, and adding or removing an id takes it off the old list.
-    # Entity.rebuild_field_indexes moves them all; once every realm has run it,
-    # _fi_old_key and what uses it can go. (_fx, not _fi, so that an old key
-    # can never be taken for the new key of another value: the old key of
-    # "a%7Cc" is the escaped form of "a|c".)
+    # repair_field_indexes moves them all, those of custom ids too (which
+    # Entity.rebuild_field_indexes does not reach); once it has run to its end
+    # on every realm, _fi_old_key and what uses it can go. (_fx, not _fi, so
+    # that an old key can never be taken for the new key of another value.)
 
     @staticmethod
     def _fi_needs_escape(value: str) -> bool:
-        return "|" in value or "%" in value
+        return "|" in value
 
     def _fi_key(self, type_name: str, field_name: str, value: str) -> str:
         if self._fi_needs_escape(value):
@@ -922,13 +967,18 @@ class Database:
         old = self._fi_old_key(type_name, field_name, value)
         if old is None:
             return ids
-        return sorted(ids + self._ix_all(old), key=_listing_order)
+        # An id on both lists (a release that did not know the new keys wrote
+        # to the old one) is listed once
+        ids = list(dict.fromkeys(ids + self._ix_all(old)))
+        return sorted(ids, key=_listing_order)
 
     def field_index_page(
         self, type_name: str, field_name: str, value: str, from_id: int, count: int
     ) -> List[str]:
         """Up to ``count`` sequential ids >= ``from_id`` whose ``field_name``
-        equals ``value``, ascending. One range read."""
+        equals ``value``, ascending. One range read; two for a value with a
+        "|" while its old key may hold entries, and one more for each key of
+        another value in the way."""
         key = self._fi_key(type_name, field_name, value)
         ids = self._ix_page(key, from_id, count)
         old = self._fi_old_key(type_name, field_name, value)
@@ -937,10 +987,12 @@ class Database:
         # The first ``count`` of both lists together are among the first
         # ``count`` of each
         ids += self._ix_page(old, from_id, count)
-        return sorted(ids, key=int)[:count]
+        return sorted(set(ids), key=int)[:count]
 
     def field_index_count(self, type_name: str, field_name: str, value: str) -> int:
-        """Number of entities whose ``field_name`` equals ``value`` (one read)."""
+        """Number of entities whose ``field_name`` equals ``value`` (one read;
+        two for a value with a "|" while its old key may hold entries, and an id
+        on both lists is counted twice until repair_field_indexes has run)."""
         total = self._ix_count(self._fi_key(type_name, field_name, value))
         old = self._fi_old_key(type_name, field_name, value)
         if old is not None:
@@ -964,6 +1016,93 @@ class Database:
         if old is not None:
             self._ix_remove(old, entity_id)
         self._ix_remove(self._fi_key(type_name, field_name, value), entity_id)
+
+    # ── Repairing field indexes ────────────────────────────────────────────────
+    #
+    # A release that does not know the _fx keys files a value with a "|" under
+    # its _fi key, and does not take an id off the _fx list when the entity's
+    # value changes or the entity is deleted. After an upgrade from it (or
+    # after a rollback to it and a new upgrade) entries are under the old key,
+    # or stale on a list, or on both. Entity.rebuild_field_indexes walks the
+    # entities, so it can add or move an entry, but it never finds a stale one
+    # and does not reach custom ids. This walks the entries instead, and checks
+    # each of a value with a "|" against its entity.
+
+    def _field_of_base(self, rest: str) -> Optional[Tuple[str, str, str]]:
+        """(type name, field, text) of ``{Type}:{field}:{text}``, when the type
+        is registered and the field indexed; None otherwise."""
+        for entity_class in self._entity_types.values():
+            type_name = entity_class.get_full_type_name()
+            if not rest.startswith(type_name + ":"):
+                continue
+            skip = len(type_name) + 1
+            field, colon, text = rest[skip:].partition(":")
+            if colon and field in entity_class._indexed_properties():
+                return type_name, field, text
+        return None
+
+    def _repair_entry(self, key: str, entity_id: str) -> None:
+        base = _entry_base(key)
+        if base is None:
+            return
+        rest, old_style = base[4:], key.startswith("_fi:")
+        if old_style and "|" not in rest:
+            return  # a value without "|": its key never changed
+        found = self._field_of_base(rest)
+        if found is None:
+            return  # not a type and field this code can judge
+        type_name, field, text = found
+        value = text if old_style else _unescape_key_text(text)
+        row = self.load(type_name, entity_id)
+        if row is not None and field not in row:
+            return  # a row from before the field: nothing to compare with
+        if row is None or row[field] is None or str(row[field]) != value:
+            self._ix_remove(base, entity_id)
+        elif old_style:
+            self.field_index_add(type_name, field, value, entity_id)
+
+    def repair_field_indexes(self, after: str = "", limit: int = 500) -> Optional[str]:
+        """Check the field-index entries of values with a ``|`` against the
+        entities, at most ``limit`` keys at a time; resumable.
+
+        An entry whose entity is gone, or no longer has that value, is removed.
+        One under the old key (before escaping) whose entity has the value is
+        moved to its present key, so an id is listed once. Entries of values
+        without a ``|`` are only looked at.
+
+            cursor = ""
+            while cursor is not None:
+                cursor = Database.get_instance().repair_field_indexes(cursor)
+
+        Run it to its end after upgrading from a release before escaping, and
+        again after a rollback to one and a new upgrade. Once it has, no old
+        key holds an entry and counts are exact. A call reads ``limit`` keys
+        (about 40 thousand instructions each) and loads the row of each entry of
+        a value with a ``|``. Keys longer than 256 bytes are not visited.
+
+        Returns:
+            The ``after`` of the call that continues, None when the walk is done.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if after and after[:4] not in _FI_FAMILIES:
+            raise ValueError("after is not a cursor of repair_field_indexes")
+        seen, last = 0, after
+        for start, end in _index_ranges(after):
+            while True:
+                wanted = limit - seen + 1  # a range starts at its last key
+                page = self._scan(start, end, wanted)
+                rows = [row for row in page if row[0] != last][: limit - seen]
+                for key, entity_id in rows:
+                    self._repair_entry(key, entity_id)
+                    last = key
+                seen += len(rows)
+                if seen >= limit:
+                    return last
+                if len(page) < wanted:
+                    break
+                start = last
+        return None
 
     # ── Sorted indexes ─────────────────────────────────────────────────────────
     #

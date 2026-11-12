@@ -280,6 +280,10 @@ def op_rebuild_indexes(w):
     ScItem.rebuild_field_indexes(from_id=1, batch=50)
 
 
+def op_repair_indexes(w):
+    Entity.db().repair_field_indexes(limit=50)
+
+
 def op_parent_get(w):
     assert _item(w).owner is not None
 
@@ -472,6 +476,8 @@ CASES = [
          ["Entity.rebuild_field_index"]),
     Case("rebuild_indexes_batch", BOUNDED, world_items, op_rebuild_indexes,
          ["Entity.rebuild_field_indexes"]),
+    Case("repair_indexes_call", BOUNDED, world_items, op_repair_indexes,
+         ["Database.repair_field_indexes"]),
     Case("update_field", BOUNDED, world_owner, op_update_field, ["Entity._save"]),
     Case("update_indexed", BOUNDED, world_owner, op_update_indexed,
          ["Database.field_index_remove"]),

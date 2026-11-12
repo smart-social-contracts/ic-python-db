@@ -658,8 +658,8 @@ class Entity:
                 cursor = Proposal.rebuild_field_index("org_scope", from_id=cursor)
 
         Idempotent — re-indexing an already-indexed entity is a no-op. An
-        entity whose value holds ``|`` or ``%`` and was indexed under the key
-        such a value had before it was escaped is moved to its present key.
+        entity whose value holds ``|`` and was indexed under the key such a
+        value had before it was escaped is moved to its present key.
 
         Returns:
             The from_id for the next batch, or None when the rebuild is done.
@@ -678,10 +678,12 @@ class Entity:
     ) -> Optional[int]:
         """``rebuild_field_index`` for every indexed field of the type at once.
 
-        Run it on each type that has indexed fields, after upgrading from a
-        version that filed values holding ``|`` or ``%`` under their own text:
-        until it has, an entity with such a value is still found, under its old
-        key, and moves when its value is next written.
+        Moves the entries of values holding ``|`` that an earlier version filed
+        under their own text, for entities with sequential ids: until they are
+        moved they are still found, under the old key. It adds an entry that is
+        missing but never removes one, and does not reach custom ids:
+        ``Database.repair_field_indexes`` does both, and is what completes the
+        move after an upgrade.
         Same cursor and batch as ``rebuild_field_index``; one batch costs the
         entities it loads once, and a write per indexed field of each.
         """

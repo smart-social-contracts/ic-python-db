@@ -183,19 +183,22 @@ The rebuild is idempotent. The `indexed` flag is not part of the schema descript
 
 Each matching id is its own storage entry, so a value can match any number of entities without reaching the backing store's `max_value_size`.
 
-### Values that hold `|` or `%`
+### Values that hold `|`
 
-An index entry is a key that starts with the value, then `|`, a letter and the id (`_fi:Ticket:status:open|n000000000042`). A value is text a caller chooses, and one that ended like such a key would put keys of its own among the entries of another value, where a page read could miss some of them. So a value with `|` or `%` in it is escaped (`|` as `%7C`, `%` as `%25`) and filed under `_fx` instead of `_fi`: no value can hold a `|`, so the keys of two values never meet. Every other value keeps the key it always had. The escaped key is longer (three characters for each `|` or `%`), which counts against the storage map's `max_key_size`.
+An index entry is a key that starts with the value, then `|`, a letter and the id (`_fi:Ticket:status:open|n000000000042`). A value is text a caller chooses, and one that ended like such a key would put keys of its own among the entries of another value, where a page read could miss some of them. So a value with a `|` in it is escaped (`|` as `%7C`, and `%` as `%25`, so that two values never share an escaped form) and filed under `_fx` instead of `_fi`: no value can hold a `|`, so the keys of two values never meet. Every other value keeps the key it always had, one with only a `%` in it included. The escaped key is longer (three characters for each `|` or `%`), which counts against the storage map's `max_key_size`.
 
-Entries filed before this, under `_fi` with the value as it was, stay readable: `find_by`, `count_by` and `field_index_*` also read the old key of a value that has one, and adding or removing an id takes it off the old list. To move them all, run this once after upgrading for each type that has indexed fields, in bounded batches like `rebuild_field_index`:
+**Upgrading from 0.14.** Entries of values with a `|`, filed before this under `_fi` with the value as it was, stay readable: `find_by`, `count_by` and `field_index_*` also read the old key of such a value, and adding or removing an id takes it off the old list. To move them all, run once after upgrading, in bounded calls:
 
 ```python
-cursor = 1
+db = Database.get_instance()
+cursor = ""
 while cursor is not None:
-    cursor = Proposal.rebuild_field_indexes(from_id=cursor, batch=200)
+    cursor = db.repair_field_indexes(cursor, limit=500)   # keys read per call
 ```
 
-It reaches entities with sequential ids; one with a custom id moves when its value is next written, and is found through its old key until then.
+`repair_field_indexes` checks each entry of a value with a `|` against its entity: it moves an old entry to its present key and removes one whose entity is gone or has another value. It reaches custom ids. `Entity.rebuild_field_indexes(from_id, batch)` does the move per type for sequential ids only, and adds entries that are missing; it never removes one. When the repair has run to its end no old key is left, and counts are exact. Keys longer than 256 bytes are not visited.
+
+**Rolling back to a release before this one, and upgrading again.** While the older release runs, it files values with a `|` under `_fi` (this release reads them there), but it does not know `_fx`: entries filed under it are invisible to it, and it does not remove one when an entity's value changes or the entity is deleted. After the next upgrade a list can hold an entity that no longer has the value, or an id on both lists, so `count_by` and `find_by` can be wrong for those values. Run `repair_field_indexes` to its end again; it puts it right.
 
 ## Sorted Fields
 

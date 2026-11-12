@@ -25,6 +25,9 @@ _SCAN_PAGE = 500
 # Field-index key families repair_field_indexes walks (see "Repairing field
 # indexes")
 _FI_FAMILIES = ("_fi:", "_fx:")
+# Most ids of an old-form list the repair converts in one call: about 245
+# thousand instructions an id, 40 billion a call
+_CONVERT_MAX_IDS = 150_000
 _BUCKETS = (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g"))
 # Purge queue of deleted index sets (see _ix_clear): fixed-width positions
 # keep its entries contiguous in key order
@@ -45,10 +48,22 @@ def _is_sequential_id(id_str: str) -> bool:
     return bool(id_str) and id_str[0] != "0" and all(c in _DIGITS for c in id_str)
 
 
+def _id_digest(entity_id: str) -> str:
+    """The digest a posting-list entry of a custom id is keyed by."""
+    return hashlib.sha256(entity_id.encode("utf-8")).hexdigest()[:_HASH_WIDTH]
+
+
 def _is_hash_entry_key(key: str) -> bool:
-    """True for the key of a posting-list entry of a custom (hashed) id."""
+    """True for a key that ends like the entry of a custom (hashed) id."""
     digest = key[-_HASH_WIDTH:]
     return key.endswith("|h" + digest) and all(c in _HEX for c in digest)
+
+
+def _is_hash_entry(key: str, value: str) -> bool:
+    """True for the posting-list entry of a custom id: it is keyed by the digest
+    of its value, which an old list stored under a value that ends like such a
+    key has no reason to match."""
+    return _is_hash_entry_key(key) and _id_digest(value) == key[-_HASH_WIDTH:]
 
 
 def _escape_key_text(text: str) -> str:
@@ -77,11 +92,15 @@ def _entry_base(key: str) -> Optional[str]:
 
 
 def _old_list_size(key: str, value: str) -> int:
-    """Ids in the list a release before 0.13 stored under ``key`` as one JSON
-    array; 0 when ``value`` is not such an array. (The entry of a custom id
-    may read as one, and is never told from it by its value: see
-    ``_is_hash_entry_key``.)"""
-    if value.startswith("[") and not _is_hash_entry_key(key):
+    """Ids in the list a release before 0.13 stored as one JSON array under
+    ``key``, a key of a value with a "|"; 0 for any other key or value. (The
+    entry of a custom id may read as an array: see ``_is_hash_entry``.)"""
+    if (
+        key.startswith("_fi:")
+        and "|" in key
+        and value.startswith("[")
+        and not _is_hash_entry(key, value)
+    ):
         return value.count(",") + 1
     return 0
 
@@ -652,20 +671,19 @@ class Database:
     def _ix_entry_key(base: str, entity_id: str) -> str:
         if _is_sequential_id(entity_id) and len(entity_id) <= _ID_WIDTH:
             return f"{base}|n{entity_id.zfill(_ID_WIDTH)}"
-        digest = hashlib.sha256(entity_id.encode("utf-8")).hexdigest()
-        return f"{base}|h{digest[:_HASH_WIDTH]}"
+        return f"{base}|h{_id_digest(entity_id)}"
 
     def _ix_count(self, base: str) -> int:
         raw = self._db_storage.get(f"{base}|c")
         if raw is not None:
             return int(raw)
-        if _is_hash_entry_key(base):
+        legacy = self._db_storage.get(base)
+        if legacy is None:
+            return 0
+        if _is_hash_entry(base, legacy):
             # An entry holds a custom id, which may read as a list: it is not
             # the array an old list was stored as, and converting it would
             # remove the entry
-            return 0
-        legacy = self._db_storage.get(base)
-        if legacy is None:
             return 0
         try:
             ids = json.loads(legacy)
@@ -1072,11 +1090,17 @@ class Database:
         return None
 
     def _repair_entry(self, key: str, value: str) -> None:
-        if _old_list_size(key, value):
-            if key.startswith("_fi:") and "|" in key:
+        size = _old_list_size(key, value)
+        if size:
+            if size <= _CONVERT_MAX_IDS:
                 # Converted into entries, which are longer keys: the walk
                 # reaches them later
                 self._ix_count(key)
+            else:
+                logger.warning(
+                    f"repair_field_indexes: the old list {key!r} has {size} ids, "
+                    f"more than a call can convert; left as it is"
+                )
             return
         base = _entry_base(key)
         if base is None:
@@ -1113,17 +1137,26 @@ class Database:
                 cursor = Database.get_instance().repair_field_indexes(cursor)
 
         Run it to its end after upgrading from a release before escaping, and
-        again after a rollback to one and a new upgrade. Nothing else needs to
-        run first. Once it has, no old key holds an entry, and counts are
-        exact, except for what it cannot judge and leaves as it is: entries of
-        a type or field this code does not index, entries whose row has no such
-        field, and an old-form list of a value that ends like ``|h`` and 24 hex
-        digits, which cannot be told from the entry of a custom id (no call
-        reads or converts it). A call reads ``limit`` keys (about 40 thousand
-        instructions each) and loads the row of each entry of a value with a
-        ``|``; a list it converts counts its ids against ``limit``, and one
-        longer than ``limit`` is converted whole, alone in its call (about 245
-        thousand instructions an id, a list is at most about 10 thousand ids).
+        again after a rollback to one and a new upgrade, **from ``after=""``**:
+        a cursor, or a note that it was done, saved before the rollback skips
+        what the older release wrote. Nothing else needs to run first. Once it
+        has run to its end, no old key holds an entry and counts are exact,
+        except for what it cannot judge and leaves as it is: entries of a type
+        or field this code does not index, entries whose row has no such field,
+        and an old-form list of more than 150 thousand ids (it is logged; any
+        read of its value traps converting it, as before).
+
+        Cost, measured on the IC: a key read about 0.1 million instructions; an
+        entry of a value with a ``|`` that is right about 0.73 million (its row
+        is loaded); an old entry moved about 2 million, so a call of 500 moves
+        is about 1 billion; and about 0.58 million for each distinct key length
+        in the whole map that a call walks past (only the lengths at which the
+        map holds a key are visited). A call is O(``limit`` + those lengths). A
+        list it converts counts its ids against ``limit``, and one longer than
+        ``limit`` is converted whole, alone in its call, at about 245 thousand
+        instructions an id: a map with limited value size holds at most about
+        10 thousand ids in a list, but a realm's is not limited (a list of
+        127,000 ids is on record: about 31 billion, a call of its own).
 
         Returns:
             The ``after`` of the call that continues, None when the walk is done.
@@ -1134,22 +1167,19 @@ class Database:
             raise ValueError("after is not a cursor of repair_field_indexes")
         seen, last = 0, after
         for start, end in self._index_ranges(after):
-            while True:
-                wanted = limit - seen + 1  # a range starts at its last key
-                page = self._scan(start, end, wanted)
-                for key, value in page:
-                    if key == last:
-                        continue
-                    cost = _old_list_size(key, value) or 1
-                    if seen and seen + cost > limit:
-                        return last
-                    self._repair_entry(key, value)
-                    last, seen = key, seen + cost
-                if seen >= limit:
+            # One more than is left: a range starts at its last key. A range
+            # with more keys than that fills the call, and ends it below
+            wanted = limit - seen + 1
+            for key, value in self._scan(start, end, wanted):
+                if key == last:
+                    continue
+                cost = _old_list_size(key, value) or 1
+                if seen and seen + cost > limit:
                     return last
-                if len(page) < wanted:
-                    break
-                start = last
+                self._repair_entry(key, value)
+                last, seen = key, seen + cost
+            if seen >= limit:
+                return last
         return None
 
     # ── Sorted indexes ─────────────────────────────────────────────────────────

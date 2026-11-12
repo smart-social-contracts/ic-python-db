@@ -404,13 +404,45 @@ class TestIndexRepair:
             db.field_index_count("IrNote", "dept", "plain") == 2
         )  # a read converts it
 
-    def test_repair_leaves_an_old_list_that_looks_like_the_entry_of_a_custom_id(self):
+    def test_repair_converts_an_old_list_under_a_value_that_ends_like_a_custom_id_entry(
+        self,
+    ):
+        # Its key ends like the entry of a custom id, but not with the digest of
+        # its own value
         db = Database.get_instance()
-        key = "_fi:IrNote:dept:a|h" + "0123456789abcdef01234567"
-        db._db_storage.insert(key, '["1"]')
-        before = _storage(db)
+        value = "a|h0123456789abcdef01234567"
+        a, b = IrNote(dept=value, kind=""), IrNote(dept=value, kind="")
+        for key in [k for k in _storage(db) if k.startswith("_fx:IrNote:dept:a%7Ch")]:
+            db._db_storage.remove(key)
+        db._db_storage.insert(f"_fi:IrNote:dept:{value}", json.dumps([a._id, b._id]))
         _repair(db)
-        assert _storage(db) == before
+        assert not _old_keys_left(db)
+        truth = {a._id: {"dept": value, "kind": ""}, b._id: {"dept": value, "kind": ""}}
+        with WithoutOldKeys():
+            _check(truth, [value])
+
+    def test_repair_counts_an_old_list_of_a_value_without_a_bar_as_one_key(self):
+        db = Database.get_instance()
+        db._db_storage.insert("_fi:IrNote:dept:plain", json.dumps(["1"] * 10))
+        for junk in ("|", "|c", "|d"):  # shorter keys, so walked first
+            db._db_storage.insert(f"_fi:IrNote:dept:{junk}", "1")
+        # 3 keys and the list, which the repair leaves: 4, not 13
+        assert db.repair_field_indexes("", 4) == "_fi:IrNote:dept:plain"
+
+    def test_repair_leaves_an_old_list_of_more_ids_than_a_call_converts(self):
+        from ic_python_db import db_engine
+
+        db = Database.get_instance()
+        original, most = db_engine._CONVERT_MAX_IDS, 5
+        try:
+            db_engine._CONVERT_MAX_IDS = most
+            db._db_storage.insert("_fi:IrNote:dept:a|b", json.dumps(["1"] * (most + 1)))
+            db._db_storage.insert("_fi:IrNote:dept:c|d", json.dumps(["1"] * most))
+            _repair(db)
+        finally:
+            db_engine._CONVERT_MAX_IDS = original
+        assert db._db_storage.get("_fi:IrNote:dept:a|b") is not None  # left
+        assert db._db_storage.get("_fi:IrNote:dept:c|d") is None  # converted
 
     def test_repair_reaches_a_key_longer_than_256_bytes(self):
         from ic_python_db.storage import MemoryStorage

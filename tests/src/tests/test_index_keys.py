@@ -185,6 +185,15 @@ class TestIndexKeys:
         assert db.field_index_count("IkNote", "dept", f"V1|h{digest}") == 0
         assert db.field_index_get("IkNote", "dept", "V1") == [custom_id]
 
+    def test_an_old_list_under_a_value_that_ends_like_a_custom_id_entry_is_read(self):
+        # Its key ends like the entry of a custom id, but not with the digest of
+        # its own value: it is a list, not an entry
+        db = Database.get_instance()
+        value = "tag|h0123456789abcdef01234567"
+        db._db_storage.insert(f"_fi:IkNote:dept:{value}", '["1", "2"]')
+        assert db.field_index_count("IkNote", "dept", value) == 2
+        assert db.field_index_get("IkNote", "dept", value) == ["1", "2"]
+
     # ── Readers go on past keys that are not entries ─────────────────────────
 
     def test_a_page_goes_on_past_keys_of_other_bases(self):

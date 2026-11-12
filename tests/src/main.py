@@ -10,6 +10,7 @@ from tests import (
     test_example_1,
     test_example_2,
     test_identity,
+    test_index_keys,
     test_indexed_fields,
     test_mixins,
     test_namespaces,

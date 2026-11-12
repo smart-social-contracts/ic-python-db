@@ -657,7 +657,9 @@ class Entity:
             while cursor is not None:
                 cursor = Proposal.rebuild_field_index("org_scope", from_id=cursor)
 
-        Idempotent — re-indexing an already-indexed entity is a no-op.
+        Idempotent — re-indexing an already-indexed entity is a no-op. An
+        entity whose value holds ``|`` or ``%`` and was indexed under the key
+        such a value had before it was escaped is moved to its present key.
 
         Returns:
             The from_id for the next batch, or None when the rebuild is done.
@@ -666,6 +668,31 @@ class Entity:
             ValueError: If the field is not declared with indexed=True
         """
         cls._require_indexed_field(field)
+        return cls._rebuild_field_indexes([field], from_id, batch)
+
+    @classmethod
+    def rebuild_field_indexes(
+        cls: Type[T],
+        from_id: int = 1,
+        batch: int = 200,
+    ) -> Optional[int]:
+        """``rebuild_field_index`` for every indexed field of the type at once.
+
+        Run it on each type that has indexed fields, after upgrading from a
+        version that filed values holding ``|`` or ``%`` under their own text:
+        until it has, an entity with such a value is still found, under its old
+        key, and moves when its value is next written.
+        Same cursor and batch as ``rebuild_field_index``; one batch costs the
+        entities it loads once, and a write per indexed field of each.
+        """
+        return cls._rebuild_field_indexes(
+            list(cls._indexed_properties()), from_id, batch
+        )
+
+    @classmethod
+    def _rebuild_field_indexes(
+        cls: Type[T], fields: List[str], from_id: int, batch: int
+    ) -> Optional[int]:
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
         if batch < 1:
@@ -680,9 +707,10 @@ class Entity:
         # One range read per batch of *live* entities (deleted ids cost nothing)
         entities = cls.load_some(from_id, batch)
         for entity in entities:
-            value = getattr(entity, field, None)
-            if value is not None:
-                db.field_index_add(type_name, field, str(value), entity._id)
+            for field in fields:
+                value = getattr(entity, field, None)
+                if value is not None:
+                    db.field_index_add(type_name, field, str(value), entity._id)
 
         if len(entities) < batch:
             return None

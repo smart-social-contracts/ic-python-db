@@ -42,6 +42,29 @@ def _is_sequential_id(id_str: str) -> bool:
     return bool(id_str) and id_str[0] != "0" and all(c in _DIGITS for c in id_str)
 
 
+def _is_hash_entry_key(key: str) -> bool:
+    """True for the key of a posting-list entry of a custom (hashed) id."""
+    digest = key[-_HASH_WIDTH:]
+    return key.endswith("|h" + digest) and all(c in _HEX for c in digest)
+
+
+def _escape_key_text(text: str) -> str:
+    """``text`` with no ``|`` in it, and still told apart from every other text.
+
+    ``%`` is written ``%25`` and ``|`` is written ``%7C``. Escaping ``%`` too is
+    what keeps two texts from sharing a result (``a|`` and ``a%7C``).
+    """
+    return text.replace("%", "%25").replace("|", "%7C")
+
+
+def _listing_order(entity_id: str) -> Tuple[int, int]:
+    """Sort key of the order ``_ix_all`` lists ids in: sequential ids
+    ascending, then the others."""
+    if _is_sequential_id(entity_id) and len(entity_id) <= _ID_WIDTH:
+        return (0, int(entity_id))
+    return (1, 0)
+
+
 def _next_sequential_id(id_str: str, digits: int) -> Optional[int]:
     """Smallest ``digits``-digit sequential id that sorts after ``id_str``.
 
@@ -563,6 +586,13 @@ class Database:
     # fixed-width suffixes keep one base's entries contiguous, and the "n"
     # entries come back in ascending numeric id order.
     #
+    # A base that holds a "|" can make keys of its own that look like another
+    # base's entries (base "a|n0000000000" has the key "a|n0000000000|c", as
+    # long as the entries "a|n000000000100"). Bases made of text a caller
+    # chooses must not hold one (see _fi_key); and a range read skips any key
+    # that is not an entry of its base and goes on, so what is left of such
+    # keys cannot hide an entry (see _ix_bucket).
+    #
     # Before 0.13 a base key held the whole set as one JSON array, which hit
     # the value-size limit at ~10k ids. Such an array is converted to entries
     # the first time its base is touched (see _ix_count).
@@ -588,6 +618,11 @@ class Database:
         raw = self._db_storage.get(f"{base}|c")
         if raw is not None:
             return int(raw)
+        if _is_hash_entry_key(base):
+            # An entry holds a custom id, which may read as a list: it is not
+            # the array an old list was stored as, and converting it would
+            # remove the entry
+            return 0
         legacy = self._db_storage.get(base)
         if legacy is None:
             return 0
@@ -643,21 +678,31 @@ class Database:
             raise ValueError("count must be at least 1")
         if self._ix_count(base) == 0 or len(str(from_id)) > _ID_WIDTH:
             return []
-        start = f"{base}|n{str(from_id).zfill(_ID_WIDTH)}"
-        end = f"{base}|n{':' * _ID_WIDTH}"
-        cut = len(base) + 2
-        # A key of another base can fall inside the range only if its suffix
-        # is not all digits (e.g. value "x|n0;..." next to value "x").
-        return [
-            value
-            for key, value in self._scan(start, end, count)
-            if all(c in _DIGITS for c in key[cut:])
-        ]
+        ids: List[str] = []
+        first = str(from_id).zfill(_ID_WIDTH)
+        for _, value in self._ix_bucket(base, "n", _ID_WIDTH, ":", count, first):
+            ids.append(value)
+            if len(ids) == count:
+                break
+        return ids
 
     def _ix_bucket(
-        self, base: str, tag: str, width: int, top: str, page_size: int = _SCAN_PAGE
+        self,
+        base: str,
+        tag: str,
+        width: int,
+        top: str,
+        page_size: int = _SCAN_PAGE,
+        first: Optional[str] = None,
     ):
-        start = f"{base}|{tag}{'0' * width}"
+        """The entries of ``base`` under ``tag`` (from the entry suffix
+        ``first``, when given), in key order.
+
+        A key of another base can fall in the range (see "Posting lists"). A
+        page that came back short is the end of the range; one that is full
+        but held such keys is not, so the scan goes on from its last key.
+        """
+        start = f"{base}|{tag}{first or '0' * width}"
         end = f"{base}|{tag}{top * width}"
         cut = len(base) + 2
         valid = _DIGITS if tag == "n" else _HEX
@@ -841,36 +886,83 @@ class Database:
     # Allow equality lookups (Entity.find_by) without scanning all entities.
     #
     # Base key: _fi:{Type}:{field}:{value} (posting list)
+    #
+    # A value is text a caller chooses, so its base must not hold a "|" (see
+    # "Posting lists"). One that holds "|" or "%" goes under _fx instead, with
+    # both written as %7C and %25: _fx:{Type}:{field}:{escaped value}. Every
+    # other value keeps the key it always had, so nothing moved for them.
+    #
+    # Such a value used to be filed under _fi with no escape. Its entries stay
+    # readable there: each call below also looks at the old key of a value that
+    # has one, and adding or removing an id takes it off the old list.
+    # Entity.rebuild_field_indexes moves them all; once every realm has run it,
+    # _fi_old_key and what uses it can go. (_fx, not _fi, so that an old key
+    # can never be taken for the new key of another value: the old key of
+    # "a%7Cc" is the escaped form of "a|c".)
+
+    @staticmethod
+    def _fi_needs_escape(value: str) -> bool:
+        return "|" in value or "%" in value
 
     def _fi_key(self, type_name: str, field_name: str, value: str) -> str:
+        if self._fi_needs_escape(value):
+            return f"_fx:{type_name}:{field_name}:{_escape_key_text(value)}"
         return f"_fi:{type_name}:{field_name}:{value}"
+
+    def _fi_old_key(self, type_name: str, field_name: str, value: str) -> Optional[str]:
+        """Where ``value`` was filed before it was escaped, if not where it is now."""
+        if self._fi_needs_escape(value):
+            return f"_fi:{type_name}:{field_name}:{value}"
+        return None
 
     def field_index_get(self, type_name: str, field_name: str, value: str) -> List[str]:
         """All ids of entities whose ``field_name`` equals ``value``
         (O(matches); prefer ``field_index_page``)."""
-        return self._ix_all(self._fi_key(type_name, field_name, value))
+        ids = self._ix_all(self._fi_key(type_name, field_name, value))
+        old = self._fi_old_key(type_name, field_name, value)
+        if old is None:
+            return ids
+        return sorted(ids + self._ix_all(old), key=_listing_order)
 
     def field_index_page(
         self, type_name: str, field_name: str, value: str, from_id: int, count: int
     ) -> List[str]:
         """Up to ``count`` sequential ids >= ``from_id`` whose ``field_name``
         equals ``value``, ascending. One range read."""
-        return self._ix_page(self._fi_key(type_name, field_name, value), from_id, count)
+        key = self._fi_key(type_name, field_name, value)
+        ids = self._ix_page(key, from_id, count)
+        old = self._fi_old_key(type_name, field_name, value)
+        if old is None:
+            return ids
+        # The first ``count`` of both lists together are among the first
+        # ``count`` of each
+        ids += self._ix_page(old, from_id, count)
+        return sorted(ids, key=int)[:count]
 
     def field_index_count(self, type_name: str, field_name: str, value: str) -> int:
         """Number of entities whose ``field_name`` equals ``value`` (one read)."""
-        return self._ix_count(self._fi_key(type_name, field_name, value))
+        total = self._ix_count(self._fi_key(type_name, field_name, value))
+        old = self._fi_old_key(type_name, field_name, value)
+        if old is not None:
+            total += self._ix_count(old)
+        return total
 
     def field_index_add(
         self, type_name: str, field_name: str, value: str, entity_id: str
     ) -> None:
         """Add an entity ID to the index entry for ``value``."""
+        old = self._fi_old_key(type_name, field_name, value)
+        if old is not None:
+            self._ix_remove(old, entity_id)
         self._ix_add(self._fi_key(type_name, field_name, value), entity_id)
 
     def field_index_remove(
         self, type_name: str, field_name: str, value: str, entity_id: str
     ) -> None:
         """Remove an entity ID from the index entry for ``value``."""
+        old = self._fi_old_key(type_name, field_name, value)
+        if old is not None:
+            self._ix_remove(old, entity_id)
         self._ix_remove(self._fi_key(type_name, field_name, value), entity_id)
 
     # ── Sorted indexes ─────────────────────────────────────────────────────────

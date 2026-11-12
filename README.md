@@ -183,6 +183,20 @@ The rebuild is idempotent. The `indexed` flag is not part of the schema descript
 
 Each matching id is its own storage entry, so a value can match any number of entities without reaching the backing store's `max_value_size`.
 
+### Values that hold `|` or `%`
+
+An index entry is a key that starts with the value, then `|`, a letter and the id (`_fi:Ticket:status:open|n000000000042`). A value is text a caller chooses, and one that ended like such a key would put keys of its own among the entries of another value, where a page read could miss some of them. So a value with `|` or `%` in it is escaped (`|` as `%7C`, `%` as `%25`) and filed under `_fx` instead of `_fi`: no value can hold a `|`, so the keys of two values never meet. Every other value keeps the key it always had. The escaped key is longer (three characters for each `|` or `%`), which counts against the storage map's `max_key_size`.
+
+Entries filed before this, under `_fi` with the value as it was, stay readable: `find_by`, `count_by` and `field_index_*` also read the old key of a value that has one, and adding or removing an id takes it off the old list. To move them all, run this once after upgrading for each type that has indexed fields, in bounded batches like `rebuild_field_index`:
+
+```python
+cursor = 1
+while cursor is not None:
+    cursor = Proposal.rebuild_field_indexes(from_id=cursor, batch=200)
+```
+
+It reaches entities with sequential ids; one with a custom id moves when its value is next written, and is found through its old key until then.
+
 ## Sorted Fields
 
 Declare `sorted=True` on an `Integer` or `Float` property to read entities in its order, highest or lowest first, without loading and sorting them all. `__sorted_indexes__` adds indexes over several fields, where each field breaks ties in the one before:

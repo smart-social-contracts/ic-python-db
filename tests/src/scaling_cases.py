@@ -519,7 +519,7 @@ CASES = [
     Case("uni_count", BOUNDED, world_badge, op_uni_count,
          ["Entity.reverse_count", "Database.reverse_count_get"], readonly=True),
     Case("uni_delete_target", BOUNDED, world_badge, op_uni_delete_target,
-         ["Database.reverse_count_delete"]),
+         ["Database.reverse_count_delete", "Database.reverse_count_names"]),
     # One-to-one
     Case("one_to_one_get", BOUNDED, world_pairs, op_one_to_one_get,
          ["OneToOne.__get__"], readonly=True),

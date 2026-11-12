@@ -128,6 +128,9 @@ class Database:
             )
 
         self._entity_types = {}
+        # {target class name: reverse counter names}, built by the first
+        # delete after the registry last changed (see reverse_count_names)
+        self._reverse_count_names: Optional[Dict[str, List[str]]] = None
         # Identity map: {(type_name, entity_id): entity}. Weak, so an entity
         # lives only as long as some caller holds it, and its entry goes with it.
         self._entity_registry = weakref.WeakValueDictionary()
@@ -396,6 +399,16 @@ class Database:
             return type_name.split("::")[-1]
         return type_name
 
+    def _set_entity_type(self, name: str, type_obj) -> None:
+        """Point a registry name at a class, dropping what is derived from the registry.
+
+        Every Entity construction registers its class again, so an unchanged
+        entry must leave the derived data alone.
+        """
+        if self._entity_types.get(name) is not type_obj:
+            self._entity_types[name] = type_obj
+            self._reverse_count_names = None
+
     def register_entity_type(self, type_obj, type_name: str = None):
         """Register an entity type with the database.
 
@@ -410,7 +423,7 @@ class Database:
         )
 
         # Always register under the full type name
-        self._entity_types[type_name] = type_obj
+        self._set_entity_type(type_name, type_obj)
 
         # For backward compatibility, also register under class name if:
         # 1. No namespace (type_name == class name) - allows non-namespaced lookups, OR
@@ -421,7 +434,7 @@ class Database:
             type_name == type_obj.__name__
             or type_obj.__name__ not in self._entity_types
         ):
-            self._entity_types[type_obj.__name__] = type_obj
+            self._set_entity_type(type_obj.__name__, type_obj)
         else:
             # Class name already registered - log warning about potential collision
             existing = self._entity_types[type_obj.__name__]
@@ -987,6 +1000,46 @@ class Database:
         key = self._rc_key(parent_type, parent_id, relation_name)
         if self._db_storage.get(key) is not None:
             self._db_storage.remove(key)
+
+    def reverse_count_names(self, type_name: str) -> List[str]:
+        """Names of the reverse counters that entities of a type carry.
+
+        These are the ``reverse_name`` of every unidirectional ManyToMany that
+        a registered class declares towards ``type_name``; a deleted entity
+        must delete its counters. Finding them reads every attribute of every
+        registered class, which costs millions of IC instructions with a
+        realm's 93 types, so the answer is kept until ``register_entity_type``
+        changes the registry.
+        """
+        if self._reverse_count_names is None:
+            self._reverse_count_names = self._find_reverse_count_names()
+        return self._reverse_count_names.get(self._extract_class_name(type_name), [])
+
+    def _find_reverse_count_names(self) -> Dict[str, List[str]]:
+        """{target class name: reverse counter names}, from the registered classes."""
+        from .properties import ManyToMany
+
+        names: Dict[str, List[str]] = {}
+        read = set()  # a base class is shared by many registered classes
+        for entity_class in self._entity_types.values():
+            if not isinstance(entity_class, type):
+                continue
+            for cls in entity_class.__mro__:
+                if cls in read:
+                    continue
+                read.add(cls)
+                for attr_name, attr in cls.__dict__.items():
+                    if attr_name.startswith("_"):
+                        continue
+                    if not isinstance(attr, ManyToMany) or not attr.unidirectional:
+                        continue
+                    for target in attr._get_allowed_types():
+                        reverse_names = names.setdefault(
+                            self._extract_class_name(target), []
+                        )
+                        if attr.reverse_name not in reverse_names:
+                            reverse_names.append(attr.reverse_name)
+        return names
 
     def get_audit(
         self, id_from: Optional[int] = None, id_to: Optional[int] = None

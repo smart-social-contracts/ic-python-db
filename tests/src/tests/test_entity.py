@@ -546,6 +546,20 @@ class TestEntity:
         assert Person.count() == 8
         assert len(Person.instances()) == 8
 
+    def test_delete_raises_when_the_count_is_already_zero(self):
+        """delete() does not clamp the count at zero: a missing count is an error.
+
+        It raises last, after it has removed the row, so a caller that catches
+        the error is left with a deleted entity (in a canister the message traps
+        and the deletion is rolled back).
+        """
+        person = Person(name="Counted", age=30)
+        Database.get_instance().delete("_system", f"{person._type}_count")
+
+        Tester.assert_raises(ValueError, person.delete)
+
+        assert Database.get_instance().load(person._type, person._id) is None
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestEntity)

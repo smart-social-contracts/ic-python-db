@@ -657,7 +657,9 @@ class Entity:
             while cursor is not None:
                 cursor = Proposal.rebuild_field_index("org_scope", from_id=cursor)
 
-        Idempotent — re-indexing an already-indexed entity is a no-op.
+        Idempotent — re-indexing an already-indexed entity is a no-op. An
+        entity whose value holds ``|`` and was indexed under the key such a
+        value had before it was escaped is moved to its present key.
 
         Returns:
             The from_id for the next batch, or None when the rebuild is done.
@@ -666,6 +668,33 @@ class Entity:
             ValueError: If the field is not declared with indexed=True
         """
         cls._require_indexed_field(field)
+        return cls._rebuild_field_indexes([field], from_id, batch)
+
+    @classmethod
+    def rebuild_field_indexes(
+        cls: Type[T],
+        from_id: int = 1,
+        batch: int = 200,
+    ) -> Optional[int]:
+        """``rebuild_field_index`` for every indexed field of the type at once.
+
+        Moves the entries of values holding ``|`` that an earlier version filed
+        under their own text, for entities with sequential ids: until they are
+        moved they are still found, under the old key. It adds an entry that is
+        missing but never removes one, and does not reach custom ids:
+        ``Database.repair_field_indexes`` does both, and is what completes the
+        move after an upgrade.
+        Same cursor and batch as ``rebuild_field_index``; one batch costs the
+        entities it loads once, and a write per indexed field of each.
+        """
+        return cls._rebuild_field_indexes(
+            list(cls._indexed_properties()), from_id, batch
+        )
+
+    @classmethod
+    def _rebuild_field_indexes(
+        cls: Type[T], fields: List[str], from_id: int, batch: int
+    ) -> Optional[int]:
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
         if batch < 1:
@@ -680,9 +709,10 @@ class Entity:
         # One range read per batch of *live* entities (deleted ids cost nothing)
         entities = cls.load_some(from_id, batch)
         for entity in entities:
-            value = getattr(entity, field, None)
-            if value is not None:
-                db.field_index_add(type_name, field, str(value), entity._id)
+            for field in fields:
+                value = getattr(entity, field, None)
+                if value is not None:
+                    db.field_index_add(type_name, field, str(value), entity._id)
 
         if len(entities) < batch:
             return None

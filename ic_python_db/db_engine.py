@@ -26,8 +26,9 @@ _SCAN_PAGE = 500
 # indexes")
 _FI_FAMILIES = ("_fi:", "_fx:")
 # Most ids of an old-form list the repair converts in one call: about 245
-# thousand instructions an id, 40 billion a call
-_CONVERT_MAX_IDS = 150_000
+# thousand instructions an id (more where other old lists are among its entry
+# keys: one more read an id), 40 billion a call, with room to spare
+_CONVERT_MAX_IDS = 120_000
 _BUCKETS = (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g"))
 # Purge queue of deleted index sets (see _ix_clear): fixed-width positions
 # keep its entries contiguous in key order
@@ -61,8 +62,9 @@ def _is_hash_entry_key(key: str) -> bool:
 
 def _is_hash_entry(key: str, value: str) -> bool:
     """True for the posting-list entry of a custom id: it is keyed by the digest
-    of its value, which an old list stored under a value that ends like such a
-    key has no reason to match."""
+    of its value. An old list stored under a value that ends like such a key
+    does not match it; only a value made for it does (``V|h`` and the digest of
+    the list's own JSON text), and that list then reads as an entry of ``V``."""
     return _is_hash_entry_key(key) and _id_digest(value) == key[-_HASH_WIDTH:]
 
 
@@ -710,7 +712,7 @@ class Database:
             return 0
         self._db_storage.remove(base)
         unique = {str(i) for i in ids}
-        # Old lists of other values among the entry keys (rare: one read to
+        # Old lists of other values among the entry keys (rare: two reads to
         # know) are converted before an entry is written over them
         crowded = any(
             self._scan(f"{base}|{tag}{'0' * width}", f"{base}|{tag}{top * width}", 1)
@@ -1175,9 +1177,15 @@ class Database:
         what the older release wrote. Nothing else needs to run first. Once it
         has run to its end, no old key holds an entry and counts are exact,
         except for what it cannot judge and leaves as it is: entries of a type
-        or field this code does not index, entries whose row has no such field,
-        and an old-form list of more than 150 thousand ids (it is logged; any
-        read of its value traps converting it, as before).
+        or field this code does not index; entries whose row has no such field;
+        an old-form list of more than 120 thousand ids (it is logged; a read of
+        its value converts it where it fits the message, about 160 thousand ids
+        in an update and 20 thousand in a query, and traps where it does not,
+        as before); and an old-form list of a value made to end with ``|h`` and
+        the digest of its own text, which reads as an entry of the value it
+        extends (only such a value matches; ``find_by`` is not affected). A
+        chain of old lists of ``V``, ``V|c``, ``V|c|c`` and so on deeper than
+        about 500 raises ``RecursionError``: also a value made for it.
 
         Cost, measured on the IC: a key read about 0.1 million instructions; an
         entry of a value with a ``|`` that is right about 0.73 million (its row

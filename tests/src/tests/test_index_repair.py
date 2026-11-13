@@ -14,6 +14,7 @@ import random
 from tester import Tester
 
 from ic_python_db import *
+from ic_python_db.db_engine import _id_digest
 
 FIELDS = ("dept", "kind")
 VALUES = [
@@ -469,26 +470,34 @@ class TestIndexRepair:
     #
     # A release before 0.13 stored a list as one array under the bare key of its
     # value. The bare key of "V|c" is where later releases keep V's count,
-    # "V|d" V's mark, and "V|n" and 12 digits an entry of V.
+    # "V|d" V's mark, and "V|n" and 12 digits or "V|h" and 24 hex digits an
+    # entry of V: of id 9, and of the custom id "abc".
 
-    SUFFIXES = ("|c", "|d", "|n000000000009")
+    SUFFIXES = (
+        "|c",
+        "|d",
+        "|n000000000009",
+        "|h0123456789abcdef01234567",  # an entry key of no id
+        "|h" + _id_digest("abc"),  # the entry key of V's custom id "abc"
+    )
 
     def _before_0_13(self, value, other, with_value=True):
-        """Entities 1 and 2 hold ``value``, 3 holds ``other``; their lists are
-        one array each, as a release before 0.13 left them."""
+        """Entities 1, 2 and "abc" hold ``value``, 3 holds ``other``; their lists
+        are one array each, as a release before 0.13 left them."""
         db = Database.get_instance()
         db.clear()
         Entity._context.clear()
         notes = [IrNote(dept=value, kind=""), IrNote(dept=value, kind="")]
+        notes.append(IrNote(_id="abc", dept=value, kind=""))
         notes.append(IrNote(dept=other, kind=""))
         for key in [
             k for k in _storage(db) if k.startswith(("_fi:IrNote:dept:", "_fx:"))
         ]:
             db._db_storage.remove(key)
         if with_value:
-            ids = json.dumps([notes[0]._id, notes[1]._id])
+            ids = json.dumps([n._id for n in notes[:3]])
             db._db_storage.insert(f"_fi:IrNote:dept:{value}", ids)
-        db._db_storage.insert(f"_fi:IrNote:dept:{other}", json.dumps([notes[2]._id]))
+        db._db_storage.insert(f"_fi:IrNote:dept:{other}", json.dumps([notes[3]._id]))
         truth = {n._id: {"dept": n.dept, "kind": ""} for n in notes}
         if not with_value:
             truth = {i: row for i, row in truth.items() if row["dept"] == other}
@@ -522,6 +531,26 @@ class TestIndexRepair:
                 db, truth = self._before_0_13(value, other)
                 db.field_index_remove("IrNote", "dept", value, "9")
                 _check(truth, [other, value])
+                # A custom id is removed and listed again, before anything is read
+                db, truth = self._before_0_13(value, other)
+                db.field_index_remove("IrNote", "dept", value, "abc")
+                row = truth.pop("abc")
+                _check(truth, [value, other])
+                db.field_index_add("IrNote", "dept", value, "abc")
+                truth["abc"] = row
+                _check(truth, [other, value])
+
+    def test_known_limit_a_value_made_for_it_reads_as_the_entry_of_another(self):
+        # The old list of "V|h" and the digest of its own text cannot be told
+        # from V's entry for a custom id with that text: it reads 0 ids, and V
+        # lists the text. Only a value made for it does this.
+        db = Database.get_instance()
+        text = '["3"]'
+        crafted = "V|h" + _id_digest(text)
+        db._db_storage.insert("_fi:IrNote:dept:V", '["1"]')
+        db._db_storage.insert(f"_fi:IrNote:dept:{crafted}", text)
+        assert db.field_index_count("IrNote", "dept", crafted) == 0
+        assert db.field_index_get("IrNote", "dept", "V") == ["1", text]
 
     def test_a_list_does_not_contain_the_id_an_old_list_of_another_value_is_keyed_by(
         self,

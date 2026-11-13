@@ -26,9 +26,10 @@ _SCAN_PAGE = 500
 # indexes")
 _FI_FAMILIES = ("_fi:", "_fx:")
 # Most ids of an old-form list the repair converts in one call: about 245
-# thousand instructions an id (more where other old lists are among its entry
-# keys: one more read an id), 40 billion a call, with room to spare
-_CONVERT_MAX_IDS = 120_000
+# thousand instructions an id, about 345 thousand where other old lists are
+# among its entry keys (one more read an id), so 24.5 billion, or 34.5 billion
+# at worst, in a call of 40 billion
+_CONVERT_MAX_IDS = 100_000
 _BUCKETS = (("n", _ID_WIDTH, ":"), ("h", _HASH_WIDTH, "g"))
 # Purge queue of deleted index sets (see _ix_clear): fixed-width positions
 # keep its entries contiguous in key order
@@ -1178,7 +1179,7 @@ class Database:
         has run to its end, no old key holds an entry and counts are exact,
         except for what it cannot judge and leaves as it is: entries of a type
         or field this code does not index; entries whose row has no such field;
-        an old-form list of more than 120 thousand ids (it is logged; a read of
+        an old-form list of more than 100 thousand ids (it is logged; a read of
         its value converts it where it fits the message, about 160 thousand ids
         in an update and 20 thousand in a query, and traps where it does not,
         as before); and an old-form list of a value made to end with ``|h`` and
@@ -1197,7 +1198,8 @@ class Database:
         ``limit`` is converted whole, alone in its call, at about 245 thousand
         instructions an id: a map with limited value size holds at most about
         10 thousand ids in a list, but a realm's is not limited (a list of
-        127,000 ids is on record: about 31 billion, a call of its own).
+        127,000 ids is on record: about 31 billion; it is over the cap, so the
+        repair leaves it, and a read of its value in an update converts it).
 
         Returns:
             The ``after`` of the call that continues, None when the walk is done.

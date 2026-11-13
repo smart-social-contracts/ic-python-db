@@ -7,6 +7,7 @@
 - A field-index value that ends like an index key (`V1|n0000000000`) no longer hides other values' records. Its count key sat among the entries of `V1`, the page read of `V1` came back short, and `find_by` and `RelationView.page`, which take a short page for the last one, stopped: every id after it was unreachable. Any writer of a value could do it.
 - A range read of a posting list goes on past keys that are not entries of its list (it already did in `_ix_all` and the purge; `_ix_page` stopped). It restarts at the last key it read instead of at the next char, which is not the next key for U+007F, U+07FF and U+FFFF, has no successor for U+10FFFF, and is a surrogate that cannot be encoded for U+D7FF.
 - The entry of a custom id that reads as a JSON list is no longer taken for a list stored before 0.13 and removed.
+- A store written before 0.13 that holds the lists of both a value `V` and `V|c`, `V|d` or `V|n` and 12 digits no longer makes every read and write of `V` fail. The bare key of such a value is where later releases keep V's count (`|c`), mark (`|d`) or an entry (`|n…`), so reading V's count raised `ValueError` on the other value's array, an entry key listed that array's text as an id, and a write to V could replace it. A key of V's own that holds another value's old list now has that list converted first (which moves it out of the way), an entry counts only if it holds the id its key spells, and the repair no longer stalls on it.
 
 ### Changed
 

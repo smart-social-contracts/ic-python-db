@@ -673,8 +673,25 @@ class Database:
             return f"{base}|n{entity_id.zfill(_ID_WIDTH)}"
         return f"{base}|h{_id_digest(entity_id)}"
 
+    def _ix_own(self, key: str) -> Optional[str]:
+        """What is stored under a key of this list's own (its count, its mark,
+        an entry of it), after an old list of another value that is stored
+        there is converted, which moves it out of the way.
+
+        Before 0.13 a list was one array under the bare key of its value, and
+        the bare key of the value "V|c" is the key of V's count; "V|d" is V's
+        mark and "V|n" and 12 digits an entry of V.
+        """
+        value = self._db_storage.get(key)
+        if value is not None and value.startswith("["):
+            # (An entry of a custom id that reads as an array is left: see
+            # _is_hash_entry)
+            self._ix_count(key)
+            value = self._db_storage.get(key)
+        return value
+
     def _ix_count(self, base: str) -> int:
-        raw = self._db_storage.get(f"{base}|c")
+        raw = self._ix_own(f"{base}|c")
         if raw is not None:
             return int(raw)
         legacy = self._db_storage.get(base)
@@ -693,8 +710,17 @@ class Database:
             return 0
         self._db_storage.remove(base)
         unique = {str(i) for i in ids}
+        # Old lists of other values among the entry keys (rare: one read to
+        # know) are converted before an entry is written over them
+        crowded = any(
+            self._scan(f"{base}|{tag}{'0' * width}", f"{base}|{tag}{top * width}", 1)
+            for tag, width, top in _BUCKETS
+        )
         for entity_id in unique:
-            self._db_storage.insert(self._ix_entry_key(base, entity_id), entity_id)
+            key = self._ix_entry_key(base, entity_id)
+            if crowded:
+                self._ix_own(key)
+            self._db_storage.insert(key, entity_id)
         if unique:
             self._db_storage.insert(f"{base}|c", str(len(unique)))
         return len(unique)
@@ -705,7 +731,7 @@ class Database:
         if count == 0:
             self._ix_revive(base)
         key = self._ix_entry_key(base, entity_id)
-        if self._db_storage.get(key) is not None:
+        if self._ix_own(key) == entity_id:
             return
         self._db_storage.insert(key, entity_id)
         self._db_storage.insert(f"{base}|c", str(count + 1))
@@ -716,8 +742,8 @@ class Database:
         if count == 0:
             return
         key = self._ix_entry_key(base, entity_id)
-        if self._db_storage.get(key) is None:
-            return
+        if self._db_storage.get(key) != entity_id:
+            return  # not listed (the key may be an old list of another value)
         self._db_storage.remove(key)
         if count > 1:
             self._db_storage.insert(f"{base}|c", str(count - 1))
@@ -727,7 +753,7 @@ class Database:
     def _ix_contains(self, base: str, entity_id: str) -> bool:
         if self._ix_count(base) == 0:
             return False
-        return self._db_storage.get(self._ix_entry_key(base, entity_id)) is not None
+        return self._db_storage.get(self._ix_entry_key(base, entity_id)) == entity_id
 
     def _ix_page(self, base: str, from_id: int, count: int) -> List[str]:
         """Up to ``count`` sequential ids >= ``from_id``, ascending."""
@@ -757,9 +783,11 @@ class Database:
         """The entries of ``base`` under ``tag`` (from the entry suffix
         ``first``, when given), in key order.
 
-        A key of another base can fall in the range (see "Posting lists"). A
-        page that came back short is the end of the range; one that is full
-        but held such keys is not, so the scan goes on from its last key.
+        A key of another base can fall in the range (see "Posting lists"), and
+        so can the old list of another value (see _ix_own): neither is an entry,
+        which holds the id its key spells. A page that came back short is the
+        end of the range; one that is full but held such keys is not, so the
+        scan goes on from its last key.
         """
         start = f"{base}|{tag}{first or '0' * width}"
         end = f"{base}|{tag}{top * width}"
@@ -775,7 +803,12 @@ class Database:
             page = self._scan(start, end, wanted)
             for key, value in page:
                 if key != last and all(c in valid for c in key[cut:]):
-                    yield key, value
+                    if tag == "n":
+                        own = value == str(int(key[cut:]))
+                    else:
+                        own = not value.startswith("[") or _is_hash_entry(key, value)
+                    if own:
+                        yield key, value
             if len(page) < wanted:
                 return
             last = start = page[-1][0]
@@ -830,7 +863,7 @@ class Database:
 
     def _ix_revive(self, base: str) -> None:
         """Before reusing a deleted set: purge its leftovers, drop its queue entry."""
-        position = self._db_storage.get(f"{base}|d")
+        position = self._ix_own(f"{base}|d")
         if position is None:
             return
         while self._ix_drain(base, _SCAN_PAGE) == _SCAN_PAGE:

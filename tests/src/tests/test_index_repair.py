@@ -14,6 +14,7 @@ import random
 from tester import Tester
 
 from ic_python_db import *
+from ic_python_db.db_engine import _id_digest
 
 FIELDS = ("dept", "kind")
 VALUES = [
@@ -404,13 +405,45 @@ class TestIndexRepair:
             db.field_index_count("IrNote", "dept", "plain") == 2
         )  # a read converts it
 
-    def test_repair_leaves_an_old_list_that_looks_like_the_entry_of_a_custom_id(self):
+    def test_repair_converts_an_old_list_under_a_value_that_ends_like_a_custom_id_entry(
+        self,
+    ):
+        # Its key ends like the entry of a custom id, but not with the digest of
+        # its own value
         db = Database.get_instance()
-        key = "_fi:IrNote:dept:a|h" + "0123456789abcdef01234567"
-        db._db_storage.insert(key, '["1"]')
-        before = _storage(db)
+        value = "a|h0123456789abcdef01234567"
+        a, b = IrNote(dept=value, kind=""), IrNote(dept=value, kind="")
+        for key in [k for k in _storage(db) if k.startswith("_fx:IrNote:dept:a%7Ch")]:
+            db._db_storage.remove(key)
+        db._db_storage.insert(f"_fi:IrNote:dept:{value}", json.dumps([a._id, b._id]))
         _repair(db)
-        assert _storage(db) == before
+        assert not _old_keys_left(db)
+        truth = {a._id: {"dept": value, "kind": ""}, b._id: {"dept": value, "kind": ""}}
+        with WithoutOldKeys():
+            _check(truth, [value])
+
+    def test_repair_counts_an_old_list_of_a_value_without_a_bar_as_one_key(self):
+        db = Database.get_instance()
+        db._db_storage.insert("_fi:IrNote:dept:plain", json.dumps(["1"] * 10))
+        for junk in ("|", "|c", "|d"):  # shorter keys, so walked first
+            db._db_storage.insert(f"_fi:IrNote:dept:{junk}", "1")
+        # 3 keys and the list, which the repair leaves: 4, not 13
+        assert db.repair_field_indexes("", 4) == "_fi:IrNote:dept:plain"
+
+    def test_repair_leaves_an_old_list_of_more_ids_than_a_call_converts(self):
+        from ic_python_db import db_engine
+
+        db = Database.get_instance()
+        original, most = db_engine._CONVERT_MAX_IDS, 5
+        try:
+            db_engine._CONVERT_MAX_IDS = most
+            db._db_storage.insert("_fi:IrNote:dept:a|b", json.dumps(["1"] * (most + 1)))
+            db._db_storage.insert("_fi:IrNote:dept:c|d", json.dumps(["1"] * most))
+            _repair(db)
+        finally:
+            db_engine._CONVERT_MAX_IDS = original
+        assert db._db_storage.get("_fi:IrNote:dept:a|b") is not None  # left
+        assert db._db_storage.get("_fi:IrNote:dept:c|d") is None  # converted
 
     def test_repair_reaches_a_key_longer_than_256_bytes(self):
         from ic_python_db.storage import MemoryStorage
@@ -432,6 +465,137 @@ class TestIndexRepair:
         finally:
             db._db_storage = original
             Entity._context.clear()
+
+    # ── Old lists of V and of V|c, V|d or V|n and 12 digits ──────────────────
+    #
+    # A release before 0.13 stored a list as one array under the bare key of its
+    # value. The bare key of "V|c" is where later releases keep V's count,
+    # "V|d" V's mark, and "V|n" and 12 digits or "V|h" and 24 hex digits an
+    # entry of V: of id 9, and of the custom id "abc".
+
+    SUFFIXES = (
+        "|c",
+        "|d",
+        "|n000000000009",
+        "|h0123456789abcdef01234567",  # an entry key of no id
+        "|h" + _id_digest("abc"),  # the entry key of V's custom id "abc"
+    )
+
+    def _before_0_13(self, value, other, with_value=True):
+        """Entities 1, 2 and "abc" hold ``value``, 3 holds ``other``; their lists
+        are one array each, as a release before 0.13 left them."""
+        db = Database.get_instance()
+        db.clear()
+        Entity._context.clear()
+        notes = [IrNote(dept=value, kind=""), IrNote(dept=value, kind="")]
+        notes.append(IrNote(_id="abc", dept=value, kind=""))
+        notes.append(IrNote(dept=other, kind=""))
+        for key in [
+            k for k in _storage(db) if k.startswith(("_fi:IrNote:dept:", "_fx:"))
+        ]:
+            db._db_storage.remove(key)
+        if with_value:
+            ids = json.dumps([n._id for n in notes[:3]])
+            db._db_storage.insert(f"_fi:IrNote:dept:{value}", ids)
+        db._db_storage.insert(f"_fi:IrNote:dept:{other}", json.dumps([notes[3]._id]))
+        truth = {n._id: {"dept": n.dept, "kind": ""} for n in notes}
+        if not with_value:
+            truth = {i: row for i, row in truth.items() if row["dept"] == other}
+        return db, truth
+
+    def test_old_lists_of_a_value_and_of_that_value_plus_a_suffix_read_right(self):
+        for value in ("V", "a|b"):
+            for suffix in self.SUFFIXES:
+                other = value + suffix
+                for order in ([value, other], [other, value]):
+                    db, truth = self._before_0_13(value, other)
+                    _check(truth, order)
+                    _check(truth, order)
+
+    def test_old_lists_of_a_value_and_of_that_value_plus_a_suffix_are_written_right(
+        self,
+    ):
+        for value in ("V", "a|b"):
+            for suffix in self.SUFFIXES:
+                other = value + suffix
+                # Written before anything is read; id 9 is the entry key of the
+                # other value's old list when the suffix is "|n000000000009"
+                db, truth = self._before_0_13(value, other)
+                db.field_index_add("IrNote", "dept", value, "9")
+                truth["9"] = {"dept": value, "kind": ""}
+                _check(truth, [value, other])
+                db.field_index_remove("IrNote", "dept", value, "9")
+                del truth["9"]
+                _check(truth, [value, other])
+                # Removing an id it does not hold takes nothing from the other
+                db, truth = self._before_0_13(value, other)
+                db.field_index_remove("IrNote", "dept", value, "9")
+                _check(truth, [other, value])
+                # A custom id is removed and listed again, before anything is read
+                db, truth = self._before_0_13(value, other)
+                db.field_index_remove("IrNote", "dept", value, "abc")
+                row = truth.pop("abc")
+                _check(truth, [value, other])
+                db.field_index_add("IrNote", "dept", value, "abc")
+                truth["abc"] = row
+                _check(truth, [other, value])
+
+    def test_known_limit_a_value_made_for_it_reads_as_the_entry_of_another(self):
+        # The old list of "V|h" and the digest of its own text cannot be told
+        # from V's entry for a custom id with that text: it reads 0 ids, and V
+        # lists the text. Only a value made for it does this.
+        db = Database.get_instance()
+        text = '["3"]'
+        crafted = "V|h" + _id_digest(text)
+        db._db_storage.insert("_fi:IrNote:dept:V", '["1"]')
+        db._db_storage.insert(f"_fi:IrNote:dept:{crafted}", text)
+        assert db.field_index_count("IrNote", "dept", crafted) == 0
+        assert db.field_index_get("IrNote", "dept", "V") == ["1", text]
+
+    def test_a_list_does_not_contain_the_id_an_old_list_of_another_value_is_keyed_by(
+        self,
+    ):
+        db = Database.get_instance()
+        db.field_index_add("IrNote", "dept", "V", "1")
+        db._db_storage.insert("_fi:IrNote:dept:V|n000000000009", '["3"]')
+        assert db._ix_contains("_fi:IrNote:dept:V", "1")
+        assert not db._ix_contains("_fi:IrNote:dept:V", "9")
+
+    def test_adding_to_a_value_with_no_list_does_not_lose_the_old_list_of_another(self):
+        for value in ("V", "a|b"):
+            for suffix in self.SUFFIXES:
+                other = value + suffix
+                db, truth = self._before_0_13(value, other, with_value=False)
+                db.field_index_add("IrNote", "dept", value, "9")
+                truth["9"] = {"dept": value, "kind": ""}
+                _check(truth, [value, other])
+
+    def test_converting_a_list_that_holds_the_id_another_old_list_is_keyed_by(self):
+        # V's list holds 9, and "V|n000000000009" has an old list: V's entry for
+        # 9 is its bare key
+        for first in ("V", "V|n000000000009"):
+            db = Database.get_instance()
+            db.clear()
+            db._db_storage.insert("_fi:IrNote:dept:V", json.dumps(["1", "9"]))
+            db._db_storage.insert("_fi:IrNote:dept:V|n000000000009", '["3"]')
+            truth = {
+                "1": {"dept": "V", "kind": ""},
+                "9": {"dept": "V", "kind": ""},
+                "3": {"dept": "V|n000000000009", "kind": ""},
+            }
+            _check(truth, [first, "V" if first != "V" else "V|n000000000009"])
+
+    def test_repair_completes_with_the_old_lists_of_a_value_and_of_it_plus_a_suffix(
+        self,
+    ):
+        for value in ("V", "a|b"):
+            for suffix in self.SUFFIXES:
+                other = value + suffix
+                db, truth = self._before_0_13(value, other)
+                _repair(db)  # even when the value it reaches first has a "|"
+                assert not _old_keys_left(db)
+                with WithoutOldKeys():
+                    _check(truth, [value, other])
 
     # ── A rollback to the release before, and the upgrade again ──────────────
 

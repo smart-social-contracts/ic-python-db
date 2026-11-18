@@ -84,30 +84,5 @@ class SystemTime:
         ]
         return f"{dt}"
 
-    @staticmethod
-    def parse_timestamp(text: Optional[str]) -> int:
-        """Read back what format_timestamp wrote.
-
-        Args:
-            text: A string like "2025-02-09 15:26:27.123"
-
-        Returns:
-            Time in milliseconds since epoch, or 0 if ``text`` is not a
-            timestamp (format_timestamp writes "None" for 0).
-        """
-        try:
-            moment = datetime(
-                int(text[0:4]),
-                int(text[5:7]),
-                int(text[8:10]),
-                int(text[11:13]),
-                int(text[14:16]),
-                int(text[17:19]),
-                int(text[20:23]) * 1000,
-            )
-            return round(moment.timestamp() * 1000)
-        except (TypeError, ValueError, OverflowError, OSError):
-            return 0
-
     def print(self) -> str:
         return self.format_timestamp(self.get_time())

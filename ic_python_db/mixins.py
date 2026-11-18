@@ -29,31 +29,32 @@ class TimestampedMixin:
 
         self._timestamp_updated = now
         self._updater = caller_id
+        # A loaded entity still holds the timestamp_updated it was stored with
+        self.__dict__.pop("timestamp_updated", None)
 
     def _restore_state(self) -> None:
-        """Set the state back from what a load stored under the public names.
+        """Set the owner, creator and updater back from what a load stored.
 
-        serialize() writes the state as ``owner``, ``timestamp_created`` and so
-        on, and a load assigns each stored field by name, so they arrive as
-        plain attributes while the mixin keeps its state in ``_owner``,
-        ``_timestamp_created`` and so on. Without this, a loaded entity has no
-        owner, so nothing is checked when it is saved, and the stale loaded
-        ``timestamp_updated`` and ``updater`` overwrite the new ones.
+        serialize() writes the state as ``owner``, ``creator`` and so on, and a
+        load assigns each stored field by name, so they arrive as plain
+        attributes while the mixin keeps its state in ``_owner``, ``_creator``
+        and so on. Without this, a loaded entity has no owner, so nothing is
+        checked when it is saved, and the stored ``updater`` overwrites the one
+        a save sets.
 
-        A field the class declares under one of those names is a Property,
+        The two timestamps stay as the text they were stored as: it is written
+        back unchanged by a save that does not set its own, and a
+        ``timestamp_updated`` is dropped when ``_update_timestamps`` sets a new
+        one. The text is not read as a time, which a canister's ``datetime``
+        could not write back.
+
+        A field the class declares under one of these names is a Property,
         which keeps its value elsewhere: it is not touched, and the mixin
         cannot restore that part of its state.
         """
-        stored = vars(self)
-        self._owner = stored.pop("owner", None)
-        self._creator = stored.pop("creator", None)
-        self._updater = stored.pop("updater", None)
-        self._timestamp_created = SystemTime.parse_timestamp(
-            stored.pop("timestamp_created", None)
-        )
-        self._timestamp_updated = SystemTime.parse_timestamp(
-            stored.pop("timestamp_updated", None)
-        )
+        self._owner = self.__dict__.pop("owner", None)
+        self._creator = self.__dict__.pop("creator", None)
+        self._updater = self.__dict__.pop("updater", None)
 
     def set_owner(self, new_owner: str) -> None:
         """Set a new owner for this entity.

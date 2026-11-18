@@ -12,13 +12,6 @@ class TestEntity(Entity, TimestampedMixin):
     pass
 
 
-def datetime_is_real() -> bool:
-    """False in a canister, where datetime is a stand-in that formats every time as 1970."""
-    return SystemTime.format_timestamp(
-        1_700_000_000_000
-    ) != SystemTime.format_timestamp(1_800_000_000_000)
-
-
 class TestMixins:
     def setUp(self):
         """Reset Entity class variables before each test."""
@@ -112,38 +105,49 @@ class TestMixins:
         doc.title = "v2"
         assert db.load("Doc", "1")["title"] == "v2"
 
-    def test_save_after_reload_writes_the_update_and_keeps_the_creation(self):
-        """The loaded timestamp_updated and updater are replaced on save, and
-        the loaded creator and timestamp_created are kept."""
+    def test_save_after_reload_keeps_the_stored_creation_and_writes_the_update(self):
+        """A save writes back the stored creator and timestamp_created as they
+        were, and its own updater and timestamp_updated, not the loaded ones.
+        The stored text is not read as a time, so this holds where datetime is
+        real and where it is a stand-in that cannot write a time back."""
 
         class Doc(Entity, TimestampedMixin):
             title = String(default="")
 
-        created_at, updated_at = 1_700_000_000_000, 1_700_000_999_000
-        system_time = SystemTime.get_instance()
-        system_time.set_time(created_at)
-        set_caller_id("alice")
-        Doc(title="v1")
+        created_text = "2025-02-09 15:26:27.123"
+        updated_text = "2025-02-09 16:00:00.000"
         db = Database.get_instance()
-        db.clear_registry()
+        db.save(
+            "Doc",
+            "1",
+            {
+                "_type": "Doc",
+                "_id": "1",
+                "title": "v1",
+                "timestamp_created": created_text,
+                "timestamp_updated": updated_text,
+                "creator": "alice",
+                "updater": "alice",
+                "owner": "alice",
+            },
+        )
+        db.save("_system", "Doc_id", "1")
 
-        system_time.set_time(updated_at)
+        updated_at = 1_800_000_000_000
+        SystemTime.get_instance().set_time(updated_at)
         set_caller_id("bob")
         doc = Doc.load("1")
+        assert doc.serialize()["timestamp_created"] == created_text
+        assert doc.serialize()["timestamp_updated"] == updated_text
         doc.set_owner("bob")
         doc.title = "v2"
 
         stored = db.load("Doc", "1")
         assert stored["creator"] == "alice"
+        assert stored["timestamp_created"] == created_text
         assert stored["owner"] == "bob"
         assert stored["updater"] == "bob"
-        if datetime_is_real():
-            assert stored["timestamp_created"] == SystemTime.format_timestamp(
-                created_at
-            )
-            assert stored["timestamp_updated"] == SystemTime.format_timestamp(
-                updated_at
-            )
+        assert stored["timestamp_updated"] == SystemTime.format_timestamp(updated_at)
 
     def test_owner_check_holds_when_the_stored_timestamps_cannot_be_read(self):
         """In a canister datetime is a stand-in and every stored timestamp
@@ -176,6 +180,7 @@ class TestMixins:
         stored = db.load("Doc", "1")
         assert stored["creator"] == "alice"
         assert stored["owner"] == "alice"
+        assert stored["timestamp_created"] == "1970-01-01 00:00:00.000"
 
     def test_row_stored_without_the_mixin_fields_is_claimed_by_its_first_save(self):
         """A row written before the class had the mixin has no owner. It
@@ -197,6 +202,69 @@ class TestMixins:
         assert stored["creator"] == "carol"
         assert self._write_is_refused(doc, "mallory")
 
+    def _rows_stored_at_version_1(self):
+        """Three rows of version 1, two owned by alice and one by bob, and the
+        version 2 code that has to migrate them when they are read."""
+
+        class Doc(Entity, TimestampedMixin):
+            __version__ = 1
+            title = String(default="")
+
+        SystemTime.get_instance().set_time(1_700_000_000_000)
+        for owner in ("alice", "alice", "bob"):
+            set_caller_id(owner)
+            Doc(title=f"by {owner}")
+        Database.get_instance().clear_registry()
+
+        class Doc(Entity, TimestampedMixin):  # the same type, new code
+            __version__ = 2
+            title = String(default="")
+            note = String(default="")
+
+        Database.get_instance().register_entity_type(Doc)
+        SystemTime.get_instance().set_time(1_800_000_000_000)
+        return Doc
+
+    def test_a_read_that_migrates_rows_is_not_checked_as_a_write(self):
+        """Migrating a row on load saves it, but the reader asked for no
+        change: it is not refused for owning nothing, and the owner, updater
+        and timestamps of the row stay as they were."""
+        reads = {
+            "load_some": lambda Doc: Doc.load_some(1, 10),
+            "page": lambda Doc: Doc.page(1, 10)[0],
+            "load": lambda Doc: [Doc.load("1"), Doc.load("3")],
+        }
+        for reader in ("carol", "bob", "alice"):
+            for name, read in reads.items():
+                Database.get_instance().clear()
+                Doc = self._rows_stored_at_version_1()
+                db = Database.get_instance()
+                before = {i: db.load("Doc", i) for i in ("1", "2", "3")}
+
+                set_caller_id(reader)
+                try:
+                    rows = read(Doc)
+                except PermissionError as e:
+                    assert False, f"{name} as {reader} raised PermissionError: {e}"
+                assert len(rows) >= 2, (name, reader, rows)
+
+                for row in rows:
+                    after = db.load("Doc", row._id)
+                    assert after["__version__"] == 2, (name, reader, after)
+                    for field in (
+                        "owner",
+                        "creator",
+                        "updater",
+                        "timestamp_created",
+                        "timestamp_updated",
+                    ):
+                        assert after[field] == before[row._id][field], (
+                            name,
+                            reader,
+                            field,
+                            after,
+                        )
+
     def test_a_field_named_like_the_mixin_keeps_its_own_value_on_reload(self):
         class Box(Entity, TimestampedMixin):
             owner = String(default="")
@@ -212,16 +280,6 @@ class TestMixins:
         stored = db.load("Box", "1")
         assert stored["owner"] == "zed"
         assert stored["creator"] == "alice"
-
-    def test_parse_timestamp_reads_what_format_timestamp_wrote(self):
-        if datetime_is_real():
-            for milliseconds in (1_700_000_999_123, 1_742_316_676_123):
-                text = SystemTime.format_timestamp(milliseconds)
-                assert SystemTime.parse_timestamp(text) == milliseconds, text
-
-    def test_parse_timestamp_gives_0_for_what_is_not_a_timestamp(self):
-        for unreadable in ("None", "", "not a time", None):
-            assert SystemTime.parse_timestamp(unreadable) == 0, unreadable
 
 
 def run(test_name: str = None, test_var: str = None):

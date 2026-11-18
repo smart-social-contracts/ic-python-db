@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A row whose `migrate()` raises no longer disappears from listings. `load_some` and `page` skipped a row that raised `ValueError` or `AttributeError` while it was built, which was meant for rows with a broken relation but also caught the error of `migrate()`. A bug in a `migrate()` left the rows counted by `count()` and missing from `load_some`, `page`, `instances` and `find`, with a warning in the log as the only trace, while `load()` of the same row raised.
+
+### Changed
+
+- **A listing that returned a partial result now raises.** `load_some`, `page`, `instances`, `find` and the index rebuilds raise `MigrationError` when the `migrate()` of a stored row raises, the way `load()` does. A row that cannot be built because of a relation is still skipped with a warning: one that carries a value for a `OneToMany`, or whose `ManyToMany` list names a row that is gone.
+- **`load()` raises `MigrationError` for such a row, no longer the error `migrate()` raised.** The message names the row (`Cfg@1`) and the versions it was migrated between, and the original error is its `__cause__`. Code that caught that error from `load()`, or from anything else that loads a row (`Entity[id]`, `find_by`, `top_by`, a relation's getter, iterating or paging a `RelationView`, the lookup `deserialize()` does to find the row to update), must catch `MigrationError`.
+
+### Added
+
+- `MigrationError`, in `ic_python_db` and `ic_python_db.errors`.
+
 ## 0.15.0 (not released)
 
 ### Fixed

@@ -1,8 +1,11 @@
 """Tests for schema migration functionality in IC Python DB."""
 
+import json
+
 from tester import Tester
 
 from ic_python_db import *
+from ic_python_db import errors
 
 
 class TestMigrations:
@@ -672,12 +675,13 @@ class TestMigrations:
 
         Database.get_instance().register_entity_type(Product)
 
-        # Migration should fail with ValueError
+        # Migration should fail, and say which row and why
         try:
             Product.load(product_id)
-            assert False, "Expected ValueError to be raised"
-        except ValueError:
-            pass  # Expected
+            assert False, "Expected MigrationError to be raised"
+        except errors.MigrationError as e:
+            assert isinstance(e.__cause__, ValueError)
+            assert f"Product@{product_id}" in str(e)
 
     def test_migration_downgrade_scenario(self):
         """Test behavior when loading newer version with older code."""
@@ -803,6 +807,97 @@ class TestMigrations:
         assert loaded.price == 0.0
         assert loaded.category == "general"
         assert loaded.in_stock is True
+
+    def _cfg_rows_one_of_which_migrate_cannot_read(self):
+        """Three rows stored at version 1, and the version 2 code, whose
+        migrate() cannot read the middle one."""
+
+        class Cfg(Entity):
+            __version__ = 1
+            data = String(default="{}")
+
+        Cfg(data='{"a": 1}')
+        Cfg(data="not json")
+        Cfg(data='{"a": 3}')
+        Database.get_instance().clear_registry()
+
+        class Cfg(Entity):  # the same type, new code
+            __version__ = 2
+            data = String(default="{}")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                json.loads(obj["data"])  # a row stored as text that is not JSON
+                return obj
+
+        Database.get_instance().register_entity_type(Cfg)
+        return Cfg
+
+    def test_migrate_error_propagates_from_every_listing(self):
+        """A row whose migrate() raises is an error in load_some, page and
+        instances as it is in load, not a row that is missing from the list
+        (the rows around it come back, so a short list looks complete)."""
+        Cfg = self._cfg_rows_one_of_which_migrate_cannot_read()
+        assert Cfg.count() == 3
+
+        reads = {
+            "load_some": lambda: Cfg.load_some(1, 10),
+            "page": lambda: Cfg.page(1, 10),
+            "instances": lambda: Cfg.instances(),
+            "load": lambda: Cfg.load("2"),
+        }
+        for name, read in reads.items():
+            try:
+                result = read()
+            except Exception as e:
+                error = e
+            else:
+                assert False, f"Cfg.{name}() returned {result!r} instead of raising"
+            assert isinstance(error, errors.MigrationError), (name, error)
+            assert "Cfg@2" in str(error), (name, str(error))
+            assert isinstance(error.__cause__, ValueError), (name, error)
+
+    def test_rows_that_cannot_be_built_are_still_skipped_by_listings(self):
+        """Two shapes of a stored row that cannot be built, each skipped by the
+        listings as before, with the rows around them returned: one that
+        carries a value for a OneToMany (which has no setter), and one whose
+        ManyToMany list names a row that is gone."""
+
+        class Account(Entity):
+            name = String()
+            entries = OneToMany("Entry", "account")
+            tags = ManyToMany("Tag", "accounts")
+
+        class Entry(Entity):
+            account = ManyToOne("Account", "entries")
+
+        class Tag(Entity):
+            accounts = ManyToMany("Account", "tags")
+
+        gone = Tag()
+        gone_id = gone._id
+        gone.delete()
+        db = Database.get_instance()
+
+        Account(name="first")
+        db.save(
+            "Account",
+            "2",
+            {"_type": "Account", "_id": "2", "name": "second", "entries": ["7"]},
+        )
+        db.save(
+            "Account",
+            "3",
+            {"_type": "Account", "_id": "3", "name": "third", "tags": [gone_id]},
+        )
+        db.save("_system", "Account_id", "3")
+        Account(name="fourth")
+        db.clear_registry()
+
+        assert [a.name for a in Account.load_some(1, 10)] == ["first", "fourth"]
+        accounts, next_from_id = Account.page(1, 10)
+        assert [a.name for a in accounts] == ["first", "fourth"]
+        assert next_from_id is None
 
 
 def run(test_name: str = None, test_var: str = None):

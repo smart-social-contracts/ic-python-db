@@ -3,6 +3,7 @@
 from tester import Tester
 
 from ic_python_db import *
+from ic_python_db.context import set_caller_id
 from ic_python_db.storage import Storage
 
 
@@ -713,6 +714,70 @@ class TestEntity:
         }
         assert counts == {"owner=mallory": 0, "kind=b": 0, "owner=alice": 2}, counts
         assert {t: db.load("Ticket", t) for t in (first._id, "t1")} == rows_before
+
+    def test_refused_deserialize_of_a_row_the_caller_does_not_own_changes_nothing(
+        self,
+    ):
+        """deserialize() merges the fields of an existing row and saves once at
+        the end. A caller who does not own the row is refused before the merge:
+        no hook runs, no index entry moves, and the instance is as it was."""
+        calls = []
+
+        class Doc(Entity, TimestampedMixin):
+            title = String(indexed=True)
+            body = String(indexed=True)
+            n = Integer()
+
+            @staticmethod
+            def on_event(entity, field_name, old_value, new_value, action):
+                calls.append(field_name)
+                return True, new_value
+
+        set_caller_id("alice")
+        try:
+            doc = Doc(title="t", body="b", n=1)
+            db = Database.get_instance()
+            row_before = db.load("Doc", doc._id)
+            calls.clear()
+
+            set_caller_id("mallory")
+            try:
+                Doc.deserialize(
+                    {
+                        "_type": "Doc",
+                        "_id": doc._id,
+                        "title": "T2",
+                        "body": "B2",
+                        "n": 2,
+                    }
+                )
+            except PermissionError:
+                pass
+            else:
+                assert False, "deserialize() by a caller who is not the owner"
+        finally:
+            set_caller_id("system")
+
+        observed = {
+            "hook calls": calls,
+            "title t": Doc.count_by("title", "t"),
+            "title T2": Doc.count_by("title", "T2"),
+            "body b": Doc.count_by("body", "b"),
+            "body B2": Doc.count_by("body", "B2"),
+            "instance": (doc.title, doc.body, doc.n),
+            "row as before": db.load("Doc", doc._id) == row_before,
+            "saving is on": not doc._do_not_save,
+        }
+        assert observed == {
+            "hook calls": [],
+            "title t": 1,
+            "title T2": 0,
+            "body b": 1,
+            "body B2": 0,
+            "instance": ("t", "b", 1),
+            "row as before": True,
+            "saving is on": True,
+        }, observed
 
 
 def run(test_name: str = None, test_var: str = None):

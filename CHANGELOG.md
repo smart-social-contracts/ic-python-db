@@ -9,7 +9,7 @@
 
 ### Added
 
-- `SystemTime.parse_timestamp`, the inverse of `format_timestamp`. It returns 0 for a text that is not a timestamp. Basilisk's `datetime` is a stand-in whose `format_timestamp` writes `1970-01-01 00:00:00.000` for any time, so the owner check does not depend on it.
+- `SystemTime.parse_timestamp`, the inverse of `format_timestamp`. It returns 0 for a text that is not a timestamp. Basilisk's `datetime` is a stand-in whose `format_timestamp` writes `1970-01-01 00:00:00.000` for any time, so in a canister the stored timestamps cannot be read back: a loaded entity has `_timestamp_created` and `_timestamp_updated` of 0, and the row it saves holds `None` as `timestamp_created` where it held that 1970 text. Neither is a time. The owner check does not depend on them.
 
 ## 0.15.0 (not released)
 

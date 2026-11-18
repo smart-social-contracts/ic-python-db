@@ -26,6 +26,8 @@ class TimestampedMixin:
             self._timestamp_created = now
             self._creator = caller_id
             self._owner = caller_id
+            # A row saved by a migration, before it was claimed, stores "None"
+            self.__dict__.pop("timestamp_created", None)
 
         self._timestamp_updated = now
         self._updater = caller_id
@@ -43,10 +45,11 @@ class TimestampedMixin:
         a save sets.
 
         The two timestamps stay as the text they were stored as: it is written
-        back unchanged by a save that does not set its own, and a
-        ``timestamp_updated`` is dropped when ``_update_timestamps`` sets a new
-        one. The text is not read as a time, which a canister's ``datetime``
-        could not write back.
+        back unchanged by a save that does not set its own. ``_update_timestamps``
+        drops ``timestamp_updated`` when it sets a new one, and
+        ``timestamp_created`` when it claims a row that had no creator. The text
+        is not read as a time, which a canister's ``datetime`` could not write
+        back.
 
         A field the class declares under one of these names is a Property,
         which keeps its value elsewhere: it is not touched, and the mixin

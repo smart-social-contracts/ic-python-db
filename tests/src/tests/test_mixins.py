@@ -202,9 +202,15 @@ class TestMixins:
         assert stored["creator"] == "carol"
         assert self._write_is_refused(doc, "mallory")
 
-    def _rows_stored_at_version_1(self):
+    def _rows_stored_at_version_1(self, overrides_save=False):
         """Three rows of version 1, two owned by alice and one by bob, and the
-        version 2 code that has to migrate them when they are read."""
+        version 2 code that has to migrate them when they are read. With
+        ``overrides_save`` the class overrides ``_save(self)`` as a subclass
+        may (ic-basilisk-toolkit's Codex does)."""
+
+        class SavesThroughSuper:
+            def _save(self):
+                return super()._save()
 
         class Doc(Entity, TimestampedMixin):
             __version__ = 1
@@ -216,7 +222,11 @@ class TestMixins:
             Doc(title=f"by {owner}")
         Database.get_instance().clear_registry()
 
-        class Doc(Entity, TimestampedMixin):  # the same type, new code
+        bases = (Entity, TimestampedMixin)
+        if overrides_save:
+            bases = (SavesThroughSuper,) + bases
+
+        class Doc(*bases):  # the same type, new code
             __version__ = 2
             title = String(default="")
             note = String(default="")
@@ -264,6 +274,59 @@ class TestMixins:
                             field,
                             after,
                         )
+
+    def test_a_read_that_migrates_rows_works_for_a_class_that_overrides_save(self):
+        """A subclass may override _save(self); the save that persists a
+        migration must not need an argument it does not take."""
+        reads = {
+            "load_some": lambda Doc: Doc.load_some(1, 10),
+            "page": lambda Doc: Doc.page(1, 10)[0],
+            "load": lambda Doc: [Doc.load("1"), Doc.load("3")],
+        }
+        for name, read in reads.items():
+            Database.get_instance().clear()
+            Doc = self._rows_stored_at_version_1(overrides_save=True)
+            set_caller_id("carol")
+            rows = read(Doc)
+            assert len(rows) >= 2, (name, rows)
+            stored = Database.get_instance().load("Doc", rows[0]._id)
+            assert stored["__version__"] == 2, (name, stored)
+            assert stored["owner"] in ("alice", "bob"), (name, stored)
+
+    def test_a_row_migrated_by_a_read_before_it_has_an_owner_is_claimed_by_a_write(
+        self,
+    ):
+        """A row stored before its class had the mixin has no owner. A read
+        that migrates it saves it without claiming it; the first write that
+        follows claims it and records a real creation time."""
+
+        class Doc(Entity, TimestampedMixin):
+            __version__ = 1
+            title = String(default="")
+
+        db = Database.get_instance()
+        db.save("Doc", "1", {"_type": "Doc", "_id": "1", "title": "v1"})
+        db.save("_system", "Doc_id", "1")
+        db.clear_registry()
+
+        class Doc(Entity, TimestampedMixin):  # the same type, new code
+            __version__ = 2
+            title = String(default="")
+            note = String(default="")
+
+        db.register_entity_type(Doc)
+        set_caller_id("carol")
+        Doc.load("1")
+        assert db.load("Doc", "1")["__version__"] == 2
+        assert db.load("Doc", "1")["owner"] is None
+
+        db.clear_registry()  # a later message loads the row again
+        doc = Doc.load("1")
+        doc.title = "v2"
+        stored = db.load("Doc", "1")
+        assert stored["owner"] == "carol"
+        assert stored["creator"] == "carol"
+        assert stored["timestamp_created"] != "None", stored
 
     def test_a_field_named_like_the_mixin_keeps_its_own_value_on_reload(self):
         class Box(Entity, TimestampedMixin):

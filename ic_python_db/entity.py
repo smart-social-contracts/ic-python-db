@@ -133,6 +133,7 @@ class Entity:
     _context: Set["Entity"] = set()
     _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
+    _migrating = False  # True while a save persists a migration made on load
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
 
@@ -281,13 +282,10 @@ class Entity:
             return f"{namespace}::{cls.__name__}"
         return cls.__name__
 
-    def _save(self, as_caller: bool = True) -> "Entity":
+    def _save(
+        self,
+    ) -> "Entity":
         """Save the entity to the database.
-
-        Args:
-            as_caller: False saves a change the caller did not ask for (a
-                migration on load): the owner is not checked, and a
-                TimestampedMixin entity keeps its updater and timestamps.
 
         Returns:
             Entity: self for chaining
@@ -325,7 +323,7 @@ class Entity:
         logger.debug(f"Saving entity {self._type}@{self._id}")
 
         # Update timestamps if mixin is present
-        if as_caller and hasattr(self, "_update_timestamps"):
+        if not self._migrating and hasattr(self, "_update_timestamps"):
             from .context import get_caller_id
 
             caller_id = get_caller_id()
@@ -495,7 +493,13 @@ class Entity:
         # If migration was applied, persist the migrated data and move its
         # index entries along with any value migrate() changed
         if stored_version != current_version:
-            entity._save(as_caller=False)
+            # The caller asked to read, not to write: the save that persists the
+            # migration neither checks the owner nor sets updater and timestamps
+            entity._migrating = True
+            try:
+                entity._save()
+            finally:
+                entity._migrating = False
             entity._reindex_after_migration(stored)
 
         return entity

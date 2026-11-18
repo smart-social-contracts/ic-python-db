@@ -66,6 +66,8 @@ class Product(Entity):
 
 `migrate()` receives the raw stored data as a dictionary. You transform it and return it. ic-python-db calls `migrate()` first, then fills in any remaining missing defaults.
 
+A row is migrated when it is loaded. If `migrate()` raises, `load()`, `load_some()`, `page()` and `instances()` all raise `MigrationError`, naming the row (`Product@1`) with the original error as its `__cause__`. No listing skips a row because of an error raised by `migrate()`: it raises, as `load()` does.
+
 ### Layer 3: Upgrade Enforcement (The Safety Net)
 
 This is the guard that prevents you from deploying a dangerous change you forgot to handle. You enable it by calling `check_upgrade_compatibility()` in your canister's `post_upgrade`:
@@ -149,6 +151,7 @@ for change in changes:
 | `schema_hash(schema)` | Compute the hash of a schema dictionary |
 | `Entity.migrate(cls, obj, from_version, to_version)` | Override this to handle breaking changes |
 | `SchemaIncompatibleError` | Raised when a dangerous change has no `migrate()` |
+| `MigrationError` | Raised when loading a row whose `migrate()` raises |
 
 ## See Also
 

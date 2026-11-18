@@ -6,6 +6,7 @@ from ic_python_logging import get_logger
 
 from .constants import LEVEL_MAX_DEFAULT
 from .db_engine import Database
+from .errors import MigrationError
 
 logger = get_logger(__name__)
 
@@ -467,6 +468,9 @@ class Entity:
 
         Shared by ``load`` (single ``get``) and ``load_some`` (range page).
         Callers must have checked the identity registry first.
+
+        Raises:
+            MigrationError: If the row's ``migrate()`` raises.
         """
         type_name = cls.get_full_type_name()
         stored_version = data.get("__version__", 1)
@@ -479,7 +483,14 @@ class Entity:
             )
             stored = dict(data)  # migrate() may change data in place
             # Apply custom migration first (developer logic takes priority)
-            data = cls.migrate(data, stored_version, current_version)
+            try:
+                data = cls.migrate(data, stored_version, current_version)
+            except Exception as e:
+                raise MigrationError(
+                    f"{type_name}@{entity_id}: migrate() from version "
+                    f"{stored_version} to {current_version} raised "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             # Auto-inject defaults for new fields not handled by migrate()
             data = cls._auto_migrate_defaults(data)
             data["__version__"] = current_version
@@ -788,8 +799,10 @@ class Entity:
                 users, cursor = User.page(cursor, 50)
 
         Only this type's own entities (not subclasses'), with canonical
-        sequential ids, as with load_some(). Entities that fail to load are
-        skipped, so a page may hold fewer than ``count``.
+        sequential ids, as with load_some(). Entities that cannot be built
+        because of a broken relation are skipped, so a page may hold fewer than
+        ``count``. An entity whose ``migrate()`` raises is not skipped: the
+        page raises MigrationError, as load() does.
         """
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
@@ -1026,6 +1039,9 @@ class Entity:
 
         Raises:
             ValueError: If from_id or count is less than 1
+            MigrationError: If the ``migrate()`` of a stored entity raises.
+                Entities that cannot be built because of a broken relation
+                are skipped; one that cannot be migrated is an error.
 
         Cost: with a range-capable storage backend (Basilisk's StableBTreeMap,
         MemoryStorage) this is one ordered range read per page regardless of

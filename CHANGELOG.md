@@ -7,6 +7,16 @@
 - `TimestampedMixin` no longer loses its owner when a row is loaded. The mixin keeps its state in `_owner`, `_creator` and `_updater`, and stores it under `owner`, `creator` and `updater`. A load assigned the stored names as plain attributes and left the underscore ones at their initial values, so an entity loaded from storage (in a canister, every entity in a message after the one that created it) had no owner and `Entity._save` checked nothing: a caller other than the owner could write it, and the row did not record who had, because the stored `timestamp_updated` and `updater` overwrote the new ones on each save. The state is now restored on load, the check holds, and a save writes its own `updater` and `timestamp_updated`. The stored `timestamp_created` is written back as it was stored, as before; the stored text is never read as a time, so it does not matter that a canister's `datetime` cannot write one.
 - The save that persists a migration when a row is loaded is not a write by the caller: it does not check the owner, and it leaves `updater` and `timestamp_updated` as stored. (With the check restored on load, a reader who did not own a row that needed migrating would have been refused.)
 - A row stored before its class had the mixin, or by an earlier release of this library, loads as before. A row with an owner keeps it; a row without one is claimed by the first caller to save it, as it was (a read that migrates it does not claim it).
+- A row whose `migrate()` raises no longer disappears from listings. `load_some` and `page` skipped a row that raised `ValueError` or `AttributeError` while it was built, which was meant for rows with a broken relation but also caught the error of `migrate()`. A bug in a `migrate()` left the rows counted by `count()` and missing from `load_some`, `page`, `instances` and `find`, with a warning in the log as the only trace, while `load()` of the same row raised.
+
+### Changed
+
+- **A listing that returned a partial result now raises.** `load_some`, `page`, `instances`, `find` and the index rebuilds raise `MigrationError` when the `migrate()` of a stored row raises, the way `load()` does. A row that cannot be built because of a relation is still skipped with a warning: one that carries a value for a `OneToMany`, or whose `ManyToMany` list names a row that is gone.
+- **`load()` raises `MigrationError` for such a row, no longer the error `migrate()` raised.** The message names the row (`Cfg@1`) and the versions it was migrated between, and the original error is its `__cause__`. Code that caught that error from `load()`, or from anything else that loads a row (`Entity[id]`, `find_by`, `top_by`, a relation's getter, iterating or paging a `RelationView`, the lookup `deserialize()` does to find the row to update), must catch `MigrationError`.
+
+### Added
+
+- `MigrationError`, in `ic_python_db` and `ic_python_db.errors`.
 
 ## 0.15.0 (not released)
 

@@ -8,3 +8,13 @@ class TooLargeError(ValueError):
     traps with no hint of the cause. This error is raised first instead, and
     its message names the paged alternative.
     """
+
+
+class MigrationError(Exception):
+    """A row's ``migrate()`` raised while the row was being loaded.
+
+    The message names the row (``Type@id``) and the versions; the error that
+    ``migrate()`` raised is the ``__cause__``. It is deliberately not a
+    ``ValueError`` or ``AttributeError``: listings skip a row that raises one
+    of those because of a broken relation, and must not skip this one.
+    """

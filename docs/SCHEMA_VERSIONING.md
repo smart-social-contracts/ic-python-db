@@ -66,7 +66,7 @@ class Product(Entity):
 
 `migrate()` receives the raw stored data as a dictionary. You transform it and return it. ic-python-db calls `migrate()` first, then fills in any remaining missing defaults.
 
-A row is migrated when it is loaded. If `migrate()` raises, `load()`, `load_some()`, `page()` and `instances()` all raise `MigrationError`, naming the row (`Product@1`) with the original error as its `__cause__`. No listing skips such a row: a bug in `migrate()` stops the call instead of leaving rows out of the result.
+A row is migrated when it is loaded. If `migrate()` raises, `load()`, `load_some()`, `page()` and `instances()` all raise `MigrationError`, naming the row (`Product@1`) with the original error as its `__cause__`. No listing skips a row because of an error raised by `migrate()`: it raises, as `load()` does.
 
 ### Layer 3: Upgrade Enforcement (The Safety Net)
 

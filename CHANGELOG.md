@@ -8,8 +8,8 @@
 
 ### Changed
 
-- **A listing that returned a partial result now raises.** `load_some`, `page`, `instances`, `find` and the index rebuilds raise `MigrationError` when the `migrate()` of a stored row raises, the way `load()` does. A row that cannot be built because of a relation is still skipped with a warning.
-- **`load()` raises `MigrationError` for such a row, no longer the error `migrate()` raised.** The message names the row (`Cfg@1`) and the versions it was migrated between, and the original error is its `__cause__`. Code that caught that error from `load()` must catch `MigrationError`.
+- **A listing that returned a partial result now raises.** `load_some`, `page`, `instances`, `find` and the index rebuilds raise `MigrationError` when the `migrate()` of a stored row raises, the way `load()` does. A row that cannot be built because of a relation is still skipped with a warning: one that carries a value for a `OneToMany`, or whose `ManyToMany` list names a row that is gone.
+- **`load()` raises `MigrationError` for such a row, no longer the error `migrate()` raised.** The message names the row (`Cfg@1`) and the versions it was migrated between, and the original error is its `__cause__`. Code that caught that error from `load()`, or from anything else that loads a row (`Entity[id]`, `find_by`, `top_by`, a relation's getter, iterating or paging a `RelationView`, the lookup `deserialize()` does to find the row to update), must catch `MigrationError`.
 
 ### Added
 

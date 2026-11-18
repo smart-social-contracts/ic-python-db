@@ -3,6 +3,7 @@
 from tester import Tester
 
 from ic_python_db import *
+from ic_python_db import errors
 
 
 class TestMigrations:
@@ -672,12 +673,13 @@ class TestMigrations:
 
         Database.get_instance().register_entity_type(Product)
 
-        # Migration should fail with ValueError
+        # Migration should fail, and say which row and why
         try:
             Product.load(product_id)
-            assert False, "Expected ValueError to be raised"
-        except ValueError:
-            pass  # Expected
+            assert False, "Expected MigrationError to be raised"
+        except errors.MigrationError as e:
+            assert isinstance(e.__cause__, ValueError)
+            assert f"Product@{product_id}" in str(e)
 
     def test_migration_downgrade_scenario(self):
         """Test behavior when loading newer version with older code."""
@@ -803,6 +805,80 @@ class TestMigrations:
         assert loaded.price == 0.0
         assert loaded.category == "general"
         assert loaded.in_stock is True
+
+    def _cfg_rows_whose_migrate_fails(self):
+        """Two rows stored at version 1, and the version 2 code that cannot read them."""
+
+        class Cfg(Entity):
+            __version__ = 1
+            data = String(default="{}")
+
+        Cfg(data='{"a": 1}')
+        Cfg(data='{"a": 2}')
+        Database.get_instance().clear_registry()
+
+        class Cfg(Entity):  # the same type, new code
+            __version__ = 2
+            data = String(default="{}")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                obj["data"].get("a")  # written for a dict; the stored value is text
+                return obj
+
+        Database.get_instance().register_entity_type(Cfg)
+        return Cfg
+
+    def test_migrate_error_propagates_from_every_listing(self):
+        """A row whose migrate() raises is an error in load_some, page and
+        instances as it is in load, not a row that is missing from the list."""
+        Cfg = self._cfg_rows_whose_migrate_fails()
+        assert Cfg.count() == 2
+
+        reads = {
+            "load_some": lambda: Cfg.load_some(1, 10),
+            "page": lambda: Cfg.page(1, 10),
+            "instances": lambda: Cfg.instances(),
+            "load": lambda: Cfg.load("1"),
+        }
+        for name, read in reads.items():
+            try:
+                result = read()
+            except Exception as e:
+                error = e
+            else:
+                assert False, f"Cfg.{name}() returned {result!r} instead of raising"
+            assert isinstance(error, errors.MigrationError), (name, error)
+            assert "Cfg@1" in str(error), (name, str(error))
+            assert isinstance(error.__cause__, AttributeError), (name, error)
+
+    def test_row_that_cannot_be_built_is_still_skipped_by_listings(self):
+        """A stored row that carries a value for a OneToMany (which has no
+        setter) cannot be built. Listings skip it, as before, and the rows
+        around it are returned."""
+
+        class Account(Entity):
+            name = String()
+            entries = OneToMany("Entry", "account")
+
+        class Entry(Entity):
+            account = ManyToOne("Account", "entries")
+
+        Account(name="first")
+        db = Database.get_instance()
+        db.save(
+            "Account",
+            "2",
+            {"_type": "Account", "_id": "2", "name": "second", "entries": ["7"]},
+        )
+        db.save("_system", "Account_id", "2")
+        Account(name="third")
+        db.clear_registry()
+
+        assert [a.name for a in Account.load_some(1, 10)] == ["first", "third"]
+        accounts, next_from_id = Account.page(1, 10)
+        assert [a.name for a in accounts] == ["first", "third"]
+        assert next_from_id is None
 
 
 def run(test_name: str = None, test_var: str = None):

@@ -134,6 +134,7 @@ class Entity:
     _context: Set["Entity"] = set()
     _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
+    _migrating = False  # True while a save persists a migration made on load
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
 
@@ -249,6 +250,8 @@ class Entity:
         for k, v in kwargs.items():
             if not k.startswith("_"):
                 setattr(self, k, v)
+        if self._loaded and hasattr(self, "_restore_state"):
+            self._restore_state()
         self._do_not_save = False
         self._hydrating = False
 
@@ -321,15 +324,12 @@ class Entity:
         logger.debug(f"Saving entity {self._type}@{self._id}")
 
         # Update timestamps if mixin is present
-        if hasattr(self, "_update_timestamps"):
+        if not self._migrating and hasattr(self, "_update_timestamps"):
             from .context import get_caller_id
 
             caller_id = get_caller_id()
-            if (
-                hasattr(self, "check_ownership")
-                and hasattr(self, "_timestamp_created")
-                and self._timestamp_created
-            ):
+            # An entity with no owner yet is being created: this save claims it
+            if hasattr(self, "check_ownership") and self._owner is not None:
                 if not self.check_ownership(caller_id):
                     raise PermissionError(
                         f"Only the owner can update this entity. Current owner: {self._owner}"
@@ -504,7 +504,13 @@ class Entity:
         # If migration was applied, persist the migrated data and move its
         # index entries along with any value migrate() changed
         if stored_version != current_version:
-            entity._save()
+            # The caller asked to read, not to write: the save that persists the
+            # migration neither checks the owner nor sets updater and timestamps
+            entity._migrating = True
+            try:
+                entity._save()
+            finally:
+                entity._migrating = False
             entity._reindex_after_migration(stored)
 
         return entity

@@ -654,6 +654,7 @@ class TestEntity:
 
         yard = Yard(name="north")
         Vehicle(kind="plain", yard=yard)  # fills the base class's lists first
+        assert Vehicle.count_by("kind", "plain") == 1
 
         class Lorry(Vehicle):
             tons = Integer(indexed=True)

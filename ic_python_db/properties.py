@@ -258,7 +258,6 @@ class Relation(Generic[E]):
 
     def validate_entity(self, entity: Any) -> bool:
         """Validate that an entity is of the correct type."""
-
         if entity is None:
             return True
         if not isinstance(entity, Entity):
@@ -282,7 +281,6 @@ class Relation(Generic[E]):
 
     def resolve_entity(self, obj: Any, value: Any) -> Optional[E]:
         """Resolve a value (Entity, ID string, or alias) to an Entity instance."""
-
         if value is None:
             return None
 
@@ -692,7 +690,6 @@ class RelationView:
 
     def add(self, entity):
         """Add an entity to this many-to-many relationship."""
-
         self._require_many_to_many("add")
         if isinstance(entity, (str, int)):
             resolved = self._prop.resolve_entity(self._owner, entity)
@@ -722,7 +719,6 @@ class RelationView:
 
     def discard(self, entity):
         """Remove an entity from this many-to-many relationship (no error if absent)."""
-
         self._require_many_to_many("discard")
         if isinstance(entity, Entity):
             entity_id = entity._id

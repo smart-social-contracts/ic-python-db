@@ -7,6 +7,7 @@ from ic_python_logging import get_logger
 from .constants import LEVEL_MAX_DEFAULT
 from .context import get_caller_id
 from .db_engine import Database
+from .errors import MigrationError
 
 logger = get_logger(__name__)
 
@@ -134,6 +135,7 @@ class Entity:
     _context: Set["Entity"] = set()
     _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
+    _migrating = False  # True while a save persists a migration made on load
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
 
@@ -253,6 +255,8 @@ class Entity:
         for k, v in kwargs.items():
             if not k.startswith("_"):
                 setattr(self, k, v)
+        if self._loaded and hasattr(self, "_restore_state"):
+            self._restore_state()
         self._do_not_save = False
         self._hydrating = False
 
@@ -283,6 +287,18 @@ class Entity:
         if namespace:
             return f"{namespace}::{cls.__name__}"
         return cls.__name__
+
+    def _check_owner(self) -> None:
+        """Raise PermissionError if the caller does not own this entity.
+
+        Only a TimestampedMixin entity has an owner. One with none yet is being
+        created, and the save that follows claims it.
+        """
+        if hasattr(self, "check_ownership") and self._owner is not None:
+            if not self.check_ownership(get_caller_id()):
+                raise PermissionError(
+                    f"Only the owner can update this entity. Current owner: {self._owner}"
+                )
 
     def _save(
         self,
@@ -325,18 +341,9 @@ class Entity:
         logger.debug(f"Saving entity {self._type}@{self._id}")
 
         # Update timestamps if mixin is present
-        if hasattr(self, "_update_timestamps"):
-            caller_id = get_caller_id()
-            if (
-                hasattr(self, "check_ownership")
-                and hasattr(self, "_timestamp_created")
-                and self._timestamp_created
-            ):
-                if not self.check_ownership(caller_id):
-                    raise PermissionError(
-                        f"Only the owner can update this entity. Current owner: {self._owner}"
-                    )
-            self._update_timestamps(caller_id)
+        if not self._migrating and hasattr(self, "_update_timestamps"):
+            self._check_owner()
+            self._update_timestamps(get_caller_id())
 
         # Save to database (full serialization preserves all relations)
         data = self._serialize_full()
@@ -470,6 +477,9 @@ class Entity:
 
         Shared by ``load`` (single ``get``) and ``load_some`` (range page).
         Callers must have checked the identity registry first.
+
+        Raises:
+            MigrationError: If the row's ``migrate()`` raises.
         """
         type_name = cls.get_full_type_name()
         stored_version = data.get("__version__", 1)
@@ -482,7 +492,14 @@ class Entity:
             )
             stored = dict(data)  # migrate() may change data in place
             # Apply custom migration first (developer logic takes priority)
-            data = cls.migrate(data, stored_version, current_version)
+            try:
+                data = cls.migrate(data, stored_version, current_version)
+            except Exception as e:
+                raise MigrationError(
+                    f"{type_name}@{entity_id}: migrate() from version "
+                    f"{stored_version} to {current_version} raised "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             # Auto-inject defaults for new fields not handled by migrate()
             data = cls._auto_migrate_defaults(data)
             data["__version__"] = current_version
@@ -496,7 +513,13 @@ class Entity:
         # If migration was applied, persist the migrated data and move its
         # index entries along with any value migrate() changed
         if stored_version != current_version:
-            entity._save()
+            # The caller asked to read, not to write: the save that persists the
+            # migration neither checks the owner nor sets updater and timestamps
+            entity._migrating = True
+            try:
+                entity._save()
+            finally:
+                entity._migrating = False
             entity._reindex_after_migration(stored)
 
         return entity
@@ -829,8 +852,10 @@ class Entity:
                 users, cursor = User.page(cursor, 50)
 
         Only this type's own entities (not subclasses'), with canonical
-        sequential ids, as with load_some(). Entities that fail to load are
-        skipped, so a page may hold fewer than ``count``.
+        sequential ids, as with load_some(). Entities that cannot be built
+        because of a broken relation are skipped, so a page may hold fewer than
+        ``count``. An entity whose ``migrate()`` raises is not skipped: the
+        page raises MigrationError, as load() does.
         """
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
@@ -1067,6 +1092,9 @@ class Entity:
 
         Raises:
             ValueError: If from_id or count is less than 1
+            MigrationError: If the ``migrate()`` of a stored entity raises.
+                Entities that cannot be built because of a broken relation
+                are skipped; one that cannot be migrated is an error.
 
         Cost: with a range-capable storage backend (Basilisk's StableBTreeMap,
         MemoryStorage) this is one ordered range read per page regardless of
@@ -1442,6 +1470,10 @@ class Entity:
         if existing_entity:
             # UPDATE existing entity
             from ic_python_db.properties import Property, Relation
+
+            # Refuse now: the fields merged below run hooks and move index
+            # entries, and the save that would refuse comes after all of them
+            existing_entity._check_owner()
 
             # Store old alias value for cleanup if it changes
             old_alias_value = None

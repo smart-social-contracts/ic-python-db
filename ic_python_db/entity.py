@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, TypeVa
 from ic_python_logging import get_logger
 
 from .constants import LEVEL_MAX_DEFAULT
+from .context import get_caller_id
 from .db_engine import Database
 from .errors import MigrationError
 
@@ -223,6 +224,10 @@ class Entity:
             # counter would only add one storage read per loaded entity.
             db = self.db()
             type_name = self._type
+            # Refuse a taken id now: each argument set below writes its index
+            # entries, and _save() only finds the row once they are written.
+            if db.load(type_name, self._id) is not None:
+                raise ValueError(f"Entity {self._type}@{self._id} already exists")
             current_max_id = db.load("_system", f"{type_name}_id")
             if current_max_id is None:
                 current_max_id = "0"
@@ -283,6 +288,18 @@ class Entity:
             return f"{namespace}::{cls.__name__}"
         return cls.__name__
 
+    def _check_owner(self) -> None:
+        """Raise PermissionError if the caller does not own this entity.
+
+        Only a TimestampedMixin entity has an owner. One with none yet is being
+        created, and the save that follows claims it.
+        """
+        if hasattr(self, "check_ownership") and self._owner is not None:
+            if not self.check_ownership(get_caller_id()):
+                raise PermissionError(
+                    f"Only the owner can update this entity. Current owner: {self._owner}"
+                )
+
     def _save(
         self,
     ) -> "Entity":
@@ -325,16 +342,8 @@ class Entity:
 
         # Update timestamps if mixin is present
         if not self._migrating and hasattr(self, "_update_timestamps"):
-            from .context import get_caller_id
-
-            caller_id = get_caller_id()
-            # An entity with no owner yet is being created: this save claims it
-            if hasattr(self, "check_ownership") and self._owner is not None:
-                if not self.check_ownership(caller_id):
-                    raise PermissionError(
-                        f"Only the owner can update this entity. Current owner: {self._owner}"
-                    )
-            self._update_timestamps(caller_id)
+            self._check_owner()
+            self._update_timestamps(get_caller_id())
 
         # Save to database (full serialization preserves all relations)
         data = self._serialize_full()
@@ -572,9 +581,16 @@ class Entity:
             if all(getattr(e, k, None) == v for k, v in d.items())
         ]
 
+    # The three lookups below walk every class in the hierarchy, so each is
+    # computed once per class, on first use, and kept in the class's own
+    # __dict__ (a subclass computes its own). Like _sorted_indexes, they read
+    # the class as it is when first used.
     @classmethod
     def _indexed_properties(cls) -> Dict[str, Any]:
         """Return {name: Property} for all properties declared with indexed=True."""
+        cached = cls.__dict__.get("_indexed_cache")
+        if cached is not None:
+            return cached
         from .properties import Property
 
         result: Dict[str, Any] = {}
@@ -584,7 +600,44 @@ class Entity:
                     continue
                 if isinstance(attr_value, Property) and attr_value.indexed:
                     result[attr_name] = attr_value
+        cls._indexed_cache = result
         return result
+
+    @classmethod
+    def _property_names(cls) -> Tuple[str, ...]:
+        """Names of all Property fields, base classes first."""
+        cached = cls.__dict__.get("_property_names_cache")
+        if cached is not None:
+            return cached
+        from .properties import Property
+
+        names: List[str] = []
+        for klass in reversed(cls.__mro__):
+            for attr_name, attr_value in klass.__dict__.items():
+                if attr_name.startswith("_") or attr_name in names:
+                    continue
+                if isinstance(attr_value, Property):
+                    names.append(attr_name)
+        cls._property_names_cache = tuple(names)
+        return cls._property_names_cache
+
+    @classmethod
+    def _foreign_key_names(cls) -> Tuple[str, ...]:
+        """Names of the ManyToOne and OneToOne fields, which store a reference."""
+        cached = cls.__dict__.get("_foreign_key_names_cache")
+        if cached is not None:
+            return cached
+        from .properties import ManyToOne, OneToOne
+
+        names: List[str] = []
+        for klass in reversed(cls.__mro__):
+            for attr_name, attr_value in klass.__dict__.items():
+                if attr_name.startswith("_") or attr_name in names:
+                    continue
+                if isinstance(attr_value, (ManyToOne, OneToOne)):
+                    names.append(attr_name)
+        cls._foreign_key_names_cache = tuple(names)
+        return cls._foreign_key_names_cache
 
     @classmethod
     def _require_indexed_field(cls, field: str) -> None:
@@ -1233,12 +1286,8 @@ class Entity:
         )
 
         # Add all property descriptors from class hierarchy
-        from ic_python_db.properties import Property
-
-        for cls in reversed(self.__class__.__mro__):
-            for k, v in cls.__dict__.items():
-                if not k.startswith("_") and isinstance(v, Property):
-                    data[k] = getattr(self, k)
+        for k in self._property_names():
+            data[k] = getattr(self, k)
 
         # Add instance attributes
         for k, v in self.__dict__.items():
@@ -1261,16 +1310,10 @@ class Entity:
         """Full serialization including relation FK references. Used by _save()."""
         data = self._serialize_base()
 
-        from ic_python_db.properties import ManyToOne, OneToOne
-
-        for cls in reversed(self.__class__.__mro__):
-            for attr_name, attr_value in cls.__dict__.items():
-                if attr_name.startswith("_"):
-                    continue
-                if isinstance(attr_value, (ManyToOne, OneToOne)):
-                    ref = self.__dict__.get(f"_rel_{attr_name}")
-                    if ref is not None:
-                        data[attr_name] = ref
+        for attr_name in self._foreign_key_names():
+            ref = self.__dict__.get(f"_rel_{attr_name}")
+            if ref is not None:
+                data[attr_name] = ref
 
         return data
 
@@ -1427,6 +1470,10 @@ class Entity:
         if existing_entity:
             # UPDATE existing entity
             from ic_python_db.properties import Property, Relation
+
+            # Refuse now: the fields merged below run hooks and move index
+            # entries, and the save that would refuse comes after all of them
+            existing_entity._check_owner()
 
             # Store old alias value for cleanup if it changes
             old_alias_value = None

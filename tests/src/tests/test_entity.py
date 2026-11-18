@@ -683,6 +683,37 @@ class TestEntity:
         assert Lorry.count_by("kind", "heavy") == 1
         Tester.assert_raises(ValueError, Vehicle.count_by, "tons", 7)
 
+    def test_duplicate_custom_id_leaves_no_index_entries(self):
+        """A custom id that already exists is refused before anything is
+        written: no index entry for the arguments, no change to the count."""
+
+        class Ticket(Entity):
+            owner = String(indexed=True)
+            kind = String(indexed=True)
+            qty = Integer()
+
+        first = Ticket(owner="alice", kind="a", qty=1)
+        Ticket(_id="t1", owner="alice", kind="a", qty=1)
+        db = Database.get_instance()
+        rows_before = {t: db.load("Ticket", t) for t in (first._id, "t1")}
+
+        for existing_id in (first._id, "t1"):
+            try:
+                Ticket(_id=existing_id, owner="mallory", kind="b", qty=2)
+            except ValueError:
+                pass
+            else:
+                assert False, f"Ticket(_id={existing_id!r}) did not raise"
+
+        assert Ticket.count() == 2
+        counts = {
+            "owner=mallory": Ticket.count_by("owner", "mallory"),
+            "kind=b": Ticket.count_by("kind", "b"),
+            "owner=alice": Ticket.count_by("owner", "alice"),
+        }
+        assert counts == {"owner=mallory": 0, "kind=b": 0, "owner=alice": 2}, counts
+        assert {t: db.load("Ticket", t) for t in (first._id, "t1")} == rows_before
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestEntity)

@@ -222,6 +222,10 @@ class Entity:
             # counter would only add one storage read per loaded entity.
             db = self.db()
             type_name = self._type
+            # Refuse a taken id now: each argument set below writes its index
+            # entries, and _save() only finds the row once they are written.
+            if db.load(type_name, self._id) is not None:
+                raise ValueError(f"Entity {self._type}@{self._id} already exists")
             current_max_id = db.load("_system", f"{type_name}_id")
             if current_max_id is None:
                 current_max_id = "0"

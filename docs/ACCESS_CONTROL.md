@@ -31,6 +31,8 @@ with db.as_user("bob"):
     doc2 = Document(title="Bob's Doc")  # Owner: bob
 ```
 
+`TimestampedMixin` also refuses a save by anyone but the owner: it raises `PermissionError`. The owner is stored with the row and read back when the row is loaded, so the check holds on an entity loaded in a later message as it does on the instance that created it. A row stored before its class had the mixin has no owner, and the first caller to save it becomes its creator and owner. A class that declares its own field named `owner`, `creator`, `updater`, `timestamp_created` or `timestamp_updated` keeps that field's value in the row, so the mixin cannot restore that part of its state.
+
 ## Access Control Pattern
 
 Combine `as_user()` with `on_event` hooks for access control:

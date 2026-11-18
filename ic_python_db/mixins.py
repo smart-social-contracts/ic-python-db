@@ -22,13 +22,38 @@ class TimestampedMixin:
             caller_id: ID of the user/process making the change
         """
         now = SystemTime.get_instance().get_time()
-        if not self._timestamp_created:
+        if self._creator is None:
             self._timestamp_created = now
             self._creator = caller_id
             self._owner = caller_id
 
         self._timestamp_updated = now
         self._updater = caller_id
+
+    def _restore_state(self) -> None:
+        """Set the state back from what a load stored under the public names.
+
+        serialize() writes the state as ``owner``, ``timestamp_created`` and so
+        on, and a load assigns each stored field by name, so they arrive as
+        plain attributes while the mixin keeps its state in ``_owner``,
+        ``_timestamp_created`` and so on. Without this, a loaded entity has no
+        owner, so nothing is checked when it is saved, and the stale loaded
+        ``timestamp_updated`` and ``updater`` overwrite the new ones.
+
+        A field the class declares under one of those names is a Property,
+        which keeps its value elsewhere: it is not touched, and the mixin
+        cannot restore that part of its state.
+        """
+        stored = vars(self)
+        self._owner = stored.pop("owner", None)
+        self._creator = stored.pop("creator", None)
+        self._updater = stored.pop("updater", None)
+        self._timestamp_created = SystemTime.parse_timestamp(
+            stored.pop("timestamp_created", None)
+        )
+        self._timestamp_updated = SystemTime.parse_timestamp(
+            stored.pop("timestamp_updated", None)
+        )
 
     def set_owner(self, new_owner: str) -> None:
         """Set a new owner for this entity.

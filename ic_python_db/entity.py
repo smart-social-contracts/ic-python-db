@@ -248,6 +248,8 @@ class Entity:
         for k, v in kwargs.items():
             if not k.startswith("_"):
                 setattr(self, k, v)
+        if self._loaded and hasattr(self, "_restore_state"):
+            self._restore_state()
         self._do_not_save = False
         self._hydrating = False
 
@@ -324,11 +326,8 @@ class Entity:
             from .context import get_caller_id
 
             caller_id = get_caller_id()
-            if (
-                hasattr(self, "check_ownership")
-                and hasattr(self, "_timestamp_created")
-                and self._timestamp_created
-            ):
+            # An entity with no owner yet is being created: this save claims it
+            if hasattr(self, "check_ownership") and self._owner is not None:
                 if not self.check_ownership(caller_id):
                     raise PermissionError(
                         f"Only the owner can update this entity. Current owner: {self._owner}"

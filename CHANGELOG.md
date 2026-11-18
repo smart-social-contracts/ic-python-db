@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `TimestampedMixin` no longer loses its owner when a row is loaded. The mixin keeps its state in `_owner`, `_creator`, `_updater`, `_timestamp_created` and `_timestamp_updated`, and stores it under `owner`, `creator`, `updater`, `timestamp_created` and `timestamp_updated`. A load assigned the stored names as plain attributes and left the underscore ones at their initial values, so an entity loaded from storage (in a canister, every entity in a message after the one that created it) had no owner and `Entity._save` checked nothing: a caller other than the owner could write it, and the row did not record who had: the stored `timestamp_updated` and `updater` overwrote the new ones on each save. The state is now restored on load, the check holds, and an update writes its own `timestamp_updated` and `updater`.
+- A row stored before its class had the mixin, or by an earlier release of this library, loads as before. A row with an owner keeps it; a row without one is claimed by the first caller to save it, as it was.
+
+### Added
+
+- `SystemTime.parse_timestamp`, the inverse of `format_timestamp`. It returns 0 for a text that is not a timestamp. Basilisk's `datetime` is a stand-in whose `format_timestamp` writes `1970-01-01 00:00:00.000` for any time, so the owner check does not depend on it.
+
 ## 0.15.0 (not released)
 
 ### Fixed

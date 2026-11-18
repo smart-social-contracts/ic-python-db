@@ -6,7 +6,6 @@ scanning all entities.
 """
 
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Generic,
@@ -17,8 +16,10 @@ from typing import (
     Union,
 )
 
-if TYPE_CHECKING:
-    from .entity import Entity
+from .constants import ACTION_CREATE, ACTION_MODIFY
+from .db_engine import Database
+from .entity import Entity
+from .hooks import call_entity_hook
 
 T = TypeVar("T")
 E = TypeVar("E", bound="Entity")
@@ -71,9 +72,6 @@ class Property(Generic[T]):
         return obj.__dict__.get(f"_{PROPERTY_STORAGE_PREFIX}_{self.name}", self.default)
 
     def __set__(self, obj, value):
-        from .constants import ACTION_CREATE, ACTION_MODIFY
-        from .hooks import call_entity_hook
-
         # Fast path: hydrating from DB — store raw value, indexes are intact.
         if getattr(obj, "_hydrating", False):
             obj.__dict__[f"_{PROPERTY_STORAGE_PREFIX}_{self.name}"] = value
@@ -127,7 +125,11 @@ class Property(Generic[T]):
         if old_value != value and obj._id is not None and hasattr(obj, "_sync_sorted"):
             obj._sync_sorted(self.name)
 
-        obj._save()
+        # The constructor, and deserialize() updating a row, save once when they
+        # are done; saving after every field would serialise the row each time
+        # just to throw the result away.
+        if not obj._do_not_save:
+            obj._save()
 
 
 class String(Property[str]):
@@ -256,7 +258,6 @@ class Relation(Generic[E]):
 
     def validate_entity(self, entity: Any) -> bool:
         """Validate that an entity is of the correct type."""
-        from .entity import Entity
 
         if entity is None:
             return True
@@ -281,7 +282,6 @@ class Relation(Generic[E]):
 
     def resolve_entity(self, obj: Any, value: Any) -> Optional[E]:
         """Resolve a value (Entity, ID string, or alias) to an Entity instance."""
-        from .entity import Entity
 
         if value is None:
             return None
@@ -342,9 +342,6 @@ class ManyToOne(Relation[E]):
         return None
 
     def __set__(self, obj, value):
-        from .db_engine import Database
-        from .entity import Entity
-
         # Fast path: loading from DB — just store the raw reference, indexes are intact
         if getattr(obj, "_do_not_save", False) and getattr(obj, "_loaded", False):
             if value is None:
@@ -446,8 +443,6 @@ class OneToOne(Relation[E]):
         if obj is None:
             return self  # type: ignore[return-value]
 
-        from .db_engine import Database
-
         # Check if this side stores the FK (owning side)
         local_ref = obj.__dict__.get(f"_rel_{self.name}")
         if local_ref is not None:
@@ -472,9 +467,6 @@ class OneToOne(Relation[E]):
         return None
 
     def __set__(self, obj, value):
-        from .db_engine import Database
-        from .entity import Entity
-
         # Fast path: loading from DB — just store the raw reference, indexes are intact
         if getattr(obj, "_do_not_save", False) and getattr(obj, "_loaded", False):
             if value is None:
@@ -599,8 +591,6 @@ class RelationView:
         self._prop = prop
 
     def _db(self):
-        from .db_engine import Database
-
         return Database.get_instance()
 
     def _key(self):
@@ -623,8 +613,6 @@ class RelationView:
         return len(self) > 0
 
     def __contains__(self, entity):
-        from .entity import Entity
-
         if isinstance(entity, Entity):
             try:
                 self._prop.validate_entity(entity)
@@ -704,7 +692,6 @@ class RelationView:
 
     def add(self, entity):
         """Add an entity to this many-to-many relationship."""
-        from .entity import Entity
 
         self._require_many_to_many("add")
         if isinstance(entity, (str, int)):
@@ -735,7 +722,6 @@ class RelationView:
 
     def discard(self, entity):
         """Remove an entity from this many-to-many relationship (no error if absent)."""
-        from .entity import Entity
 
         self._require_many_to_many("discard")
         if isinstance(entity, Entity):
@@ -827,9 +813,6 @@ class ManyToMany(Relation[E]):
         return RelationView(obj, self)  # type: ignore[return-value]
 
     def __set__(self, obj, values):
-        from .db_engine import Database
-        from .entity import Entity
-
         if values is None:
             values = []
         if isinstance(values, Entity):

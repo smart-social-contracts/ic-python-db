@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Cheaper reads and writes of entities.** Measured in a canister (basilisk 0.15.1 template, instructions): a cold `Listing` load (8 fields) 1.43M to 0.39M, `page(50)` 67.6M to 16.0M, `instances()` over 300 rows 403.6M to 93.4M, creating a `Listing` (8 arguments, 3 indexed, 1 sorted) 11.1M to 4.2M, creating a 4-field entity 4.85M to 1.36M, updating one plain field 1.02M to 0.44M.
+  - The imports `Property.__set__` and the relation setters ran for each field of each entity they built are now at module level. In a canister each costs about 64,000 instructions, 128,000 of the 138,000 a field cost to load.
+  - The lists of a class's fields that `save`, `find_by`, `count_by` and `delete` walked the whole class hierarchy for (properties, foreign keys, indexed properties) are computed once per class, on first use, as `_sorted_indexes` already was. They read the class as it is when first used.
+  - The constructor no longer saves the row after each argument. It read storage and serialised the row for each one, and threw the result away, since saving is off until the constructor ends: 8 reads for a `Listing` with 8 arguments. The row is saved once, at the end, and a hook, an index entry or an audit record is made exactly as before.
+- Failure paths of a constructor, which were not made safe and are not made worse in kind: an argument that is refused no longer leaves the type's count raised by the arguments before it (the row's id counter and the index entries of the arguments before it are still left behind), and a custom id that already exists is now found after all the arguments have been set, not after the first, so the index entries of every indexed argument are left behind, not only the first's. Both are [#43](https://github.com/smart-social-contracts/ic-python-db/issues/43).
+
 ## 0.15.0 (not released)
 
 ### Fixed

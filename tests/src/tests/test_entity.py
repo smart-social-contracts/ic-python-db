@@ -3,6 +3,36 @@
 from tester import Tester
 
 from ic_python_db import *
+from ic_python_db.storage import Storage
+
+
+class CountingStorage(Storage):
+    """Passes every call on to ``inner`` and counts the reads and the writes."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.reads = 0
+        self.writes = 0
+
+    def get(self, key):
+        self.reads += 1
+        return self.inner.get(key)
+
+    def insert(self, key, value):
+        self.writes += 1
+        return self.inner.insert(key, value)
+
+    def remove(self, key):
+        return self.inner.remove(key)
+
+    def items(self):
+        return self.inner.items()
+
+    def keys(self):
+        return self.inner.keys()
+
+    def __contains__(self, key):
+        return key in self.inner
 
 
 class Person(Entity):
@@ -559,6 +589,99 @@ class TestEntity:
         Tester.assert_raises(ValueError, person.delete)
 
         assert Database.get_instance().load(person._type, person._id) is None
+
+    def test_constructor_arguments_cost_no_storage_operations(self):
+        """Each argument is set without saving the row: the one save at the
+        end is all that reads or writes, as when there are no arguments."""
+
+        class Gadget(Entity):
+            name = String()
+            a = Integer()
+            b = Integer()
+            c = String()
+
+        db = Database.get_instance()
+        original = db._db_storage
+        counting = CountingStorage(original)
+        db._db_storage = counting
+        try:
+            Gadget()
+            bare = (counting.reads, counting.writes)
+            counting.reads = counting.writes = 0
+            gadget = Gadget(name="n", a=1, b=2, c="x")
+            with_arguments = (counting.reads, counting.writes)
+        finally:
+            db._db_storage = original
+        assert with_arguments == bare, (bare, with_arguments)
+        assert db.load("Gadget", gadget._id)["c"] == "x"
+
+    def test_hooks_fire_for_each_argument_and_each_assignment(self):
+        calls = []
+
+        class Tracked(Entity):
+            a = Integer()
+            b = Integer()
+
+            @staticmethod
+            def on_event(entity, field_name, old_value, new_value, action):
+                calls.append((field_name, old_value, new_value, action))
+                return True, new_value
+
+        item = Tracked(a=1, b=2)
+        item.a = 1  # the same value: the hook still fires
+        item.b = 3
+        assert calls == [
+            ("a", None, 1, ACTION_CREATE),
+            ("b", None, 2, ACTION_CREATE),
+            ("a", 1, 1, ACTION_MODIFY),
+            ("b", 2, 3, ACTION_MODIFY),
+        ]
+
+    def test_per_class_lookups_follow_the_class_hierarchy(self):
+        """The lists of fields are kept per class, so a base class that has
+        been used does not hide a subclass defined later, and a subclass does
+        not add its fields to its base or to a sibling."""
+
+        class Yard(Entity):
+            name = String()
+            vehicles = OneToMany("Vehicle", "yard")
+            lorries = OneToMany("Lorry", "depot")
+
+        class Vehicle(Entity):
+            kind = String(indexed=True)
+            yard = ManyToOne("Yard", "vehicles")
+
+        yard = Yard(name="north")
+        Vehicle(kind="plain", yard=yard)  # fills the base class's lists first
+
+        class Lorry(Vehicle):
+            tons = Integer(indexed=True)
+            depot = ManyToOne("Yard", "lorries")
+
+        class Van(Vehicle):
+            seats = Integer()
+
+        lorry = Lorry(kind="heavy", tons=7, yard=yard, depot=yard)
+        van = Van(kind="light", seats=3)
+        vehicle = Vehicle(kind="plain")
+
+        assert set(Lorry._indexed_properties()) == {"kind", "tons"}
+        assert set(Van._indexed_properties()) == {"kind"}
+        assert set(Vehicle._indexed_properties()) == {"kind"}
+
+        db = Database.get_instance()
+        stored_lorry = db.load("Lorry", lorry._id)
+        stored_van = db.load("Van", van._id)
+        stored_vehicle = db.load("Vehicle", vehicle._id)
+        assert (stored_lorry["tons"], stored_lorry["depot"]) == (7, yard._id)
+        assert stored_lorry["yard"] == yard._id
+        assert "tons" not in stored_van and "depot" not in stored_van
+        assert "depot" not in stored_vehicle
+        assert stored_van["seats"] == 3
+        assert "tons" not in stored_vehicle and "seats" not in stored_vehicle
+        assert Lorry.count_by("tons", 7) == 1
+        assert Lorry.count_by("kind", "heavy") == 1
+        Tester.assert_raises(ValueError, Vehicle.count_by, "tons", 7)
 
 
 def run(test_name: str = None, test_var: str = None):

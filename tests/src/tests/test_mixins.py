@@ -315,6 +315,7 @@ class TestMixins:
             note = String(default="")
 
         db.register_entity_type(Doc)
+        SystemTime.get_instance().set_time(1_700_000_000_000)  # a canister has none
         set_caller_id("carol")
         Doc.load("1")
         assert db.load("Doc", "1")["__version__"] == 2

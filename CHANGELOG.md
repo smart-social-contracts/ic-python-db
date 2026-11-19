@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.0
 
 ### Fixed
 
@@ -24,7 +24,14 @@
 
 - `MigrationError`, in `ic_python_db` and `ic_python_db.errors`.
 
-## 0.15.0 (not released)
+### Upgrading from 0.15
+
+1. Catch `MigrationError` where you caught the error your `migrate()` raises: from `load()`, and from anything that loads a row (see Changed).
+2. Listings raise on a row whose `migrate()` raises. Under 0.15 such a row was missing from `load_some`, `page`, `instances` and `find`, and the log said `Skipping <Type>@<id>: <error>`. Look for that line, and fix the `migrate()` before you upgrade.
+3. If your code sets a caller (`set_caller_id`, `as_user`) and uses `TimestampedMixin`, a save of a loaded entity by a caller who is not its owner now raises `PermissionError`, as it already did on the instance that created it. Code that never sets a caller saves as `"system"` and is not affected.
+4. From 0.14 or earlier, also follow "Upgrading from 0.14" below.
+
+## 0.15.0
 
 ### Fixed
 

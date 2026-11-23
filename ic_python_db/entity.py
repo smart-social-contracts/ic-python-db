@@ -470,9 +470,34 @@ class Entity:
                 f"{label}: migrate() from version {stored_version} to "
                 f"{current_version} raised {type(e).__name__}: {e}"
             ) from e
+        cls._check_migrated_values(label, data, migrated, stored_version)
         migrated = cls._auto_migrate_defaults(migrated)
         migrated["__version__"] = current_version
         return migrated
+
+    @classmethod
+    def _check_migrated_values(
+        cls, label: str, data: dict, migrated: dict, stored_version: int
+    ) -> None:
+        """Check each property value ``migrate()`` set or changed the way a
+        write checks it, converting it as a write would. A row is built from
+        storage without checks (it was checked when written), so without this
+        a value ``migrate()`` got wrong was stored as it was.
+
+        Raises:
+            MigrationError: If a property refuses such a value.
+        """
+        for name in cls._property_names():
+            if name not in migrated or (name in data and migrated[name] == data[name]):
+                continue
+            try:
+                migrated[name] = getattr(cls, name)._checked(migrated[name])
+            except (TypeError, ValueError) as e:
+                raise MigrationError(
+                    f"{label}: migrate() from version {stored_version} to "
+                    f"{cls.__version__} set {name} to {migrated[name]!r}, which "
+                    f"the field refuses: {e}"
+                ) from e
 
     @classmethod
     def load(

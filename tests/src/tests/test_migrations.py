@@ -925,6 +925,50 @@ class TestMigrations:
         assert loaded.category == "archive"
         assert loaded.in_stock is False
 
+    def test_values_migrate_sets_are_checked_as_a_write_checks_them(self):
+        """A value migrate() got wrong is a MigrationError, not a stored row
+        that a later write of the same value refuses. Text for a number is
+        converted, as a write converts it. A field migrate() left alone is not
+        checked: it was checked when it was written."""
+
+        class Member(Entity):
+            __version__ = 1
+            handle = String()
+            age = Integer()
+
+        Member(handle="alice", age=30)
+        Member(handle="bobbybobby", age=40)
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Member(Entity):  # the same type, new code
+            __version__ = 2
+            handle = String(max_length=5)
+            age = Integer()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if obj["handle"] == "alice":
+                    obj["handle"] = "alice" * 5
+                else:
+                    obj["age"] = "41"
+                return obj
+
+        db.register_entity_type(Member)
+        before = db.load("Member", "1")
+        try:
+            Member.load("1")
+            assert False, "migrate() stored a value its field refuses"
+        except errors.MigrationError as e:
+            assert "Member@1" in str(e) and "handle" in str(e), str(e)
+            assert isinstance(e.__cause__, ValueError)
+        assert db.load("Member", "1") == before
+
+        bob = Member.load("2")
+        assert bob.age == 41
+        assert bob.handle == "bobbybobby"
+        assert db.load("Member", "2")["age"] == 41
+
     def test_migrated_values_move_in_the_field_index(self):
         """A value that migrate() changes leaves the old value's index entry
         and is found under the new one."""

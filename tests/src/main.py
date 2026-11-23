@@ -3,6 +3,7 @@ from ic_python_db._cdk import StableBTreeMap, ic, query, update
 from tests import (
     test_alias_and_properties,
     test_audit,
+    test_auto_register,
     test_benchmark,
     test_database,
     test_enhanced_relations,
@@ -13,6 +14,7 @@ from tests import (
     test_index_keys,
     test_index_repair,
     test_indexed_fields,
+    test_migrations,
     test_mixins,
     test_namespaces,
     test_paging,
@@ -20,6 +22,7 @@ from tests import (
     test_relation_view,
     test_relationships,
     test_scaling,
+    test_schema,
     test_serialization,
     test_sorted,
     test_stress,
@@ -47,6 +50,11 @@ db_audit = StableBTreeMap[str, str](
 
 Database.init(audit_enabled=True, db_storage=db_storage, db_audit=db_audit)
 
+# Set each time this module runs: at install, and again at every upgrade that
+# really happens. entrypoint.sh compares it across an upgrade, because dfx
+# skips installing a wasm it already has and still says "Upgraded code".
+BOOT_TIME = ic.time()
+
 
 @update
 def run_test(module_name: str, test_name: str = None, test_var: str = None) -> int:
@@ -59,3 +67,8 @@ def run_test(module_name: str, test_name: str = None, test_var: str = None) -> i
 @query
 def dump_json() -> str:
     return Database.get_instance().raw_dump_json()
+
+
+@query
+def boot_time() -> int:
+    return BOOT_TIME

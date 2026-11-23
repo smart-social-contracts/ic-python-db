@@ -29,7 +29,12 @@ jobs:
         pip install -r requirements-dev.txt
         pip install .
         
-    - name: Run tests with pytest
+    - name: Run tests
       run: |
         cd tests && ./run_test.sh
+
+    # These two are written for pytest (fixtures, pytest.raises), not for
+    # tests/src/tester.py, so run_test.sh and the canister cannot run them.
+    - name: Run the pytest-only tests
+      run: python -m pytest tests/src/tests/test_context.py tests/src/tests/test_hooks.py --no-cov
 

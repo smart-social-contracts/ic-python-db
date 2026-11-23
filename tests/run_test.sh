@@ -8,6 +8,7 @@ cd src
 
 exit_code=0
 
+# The same list as entrypoint.sh, which runs each module in a canister.
 TEST_IDS=("example_1" "example_2" "entity" "mixins" "properties" "alias_and_properties" "relationships" "enhanced_relations" "serialization" "namespaces" "migrations" "database" "audit" "auto_register" "schema" "indexed_fields" "relation_view" "paging" "identity" "sorted" "index_keys" "index_repair")
 
 # Check if a specific test ID is provided as an argument

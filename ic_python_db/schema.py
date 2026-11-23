@@ -451,6 +451,24 @@ def _diff_relationships(
             )
 
 
+def _refuse_orphaning_rows(db: "Database", changes: List[SchemaChange]) -> None:
+    """Make a removed entity type breaking while rows of it are stored.
+
+    diff_schemas() sees only the schemas, where removing a type looks safe. A
+    class renamed, or dropped by mistake, leaves its rows stored and read by
+    nothing; no migrate() can reach them, so this is never waived."""
+    for change in changes:
+        if change.change_type != ChangeType.ENTITY_REMOVED:
+            continue
+        rows = int(db.load("_system", f"{change.entity_type}_count") or 0)
+        if rows:
+            change.safe = False
+            change.reason = (
+                f"Removed entity type with {rows} stored rows — nothing would "
+                f"read them; keep the class, or delete its rows first"
+            )
+
+
 def check_upgrade_compatibility(
     db: "Database",
     raise_on_error: bool = True,
@@ -484,6 +502,7 @@ def check_upgrade_compatibility(
         return []
 
     changes = diff_schemas(old_schema_data, current_schema)
+    _refuse_orphaning_rows(db, changes)
 
     breaking_without_migrate = []
     for change in changes:

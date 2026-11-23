@@ -1,3 +1,5 @@
+import json
+
 from ic_python_db import *
 from ic_python_db._cdk import StableBTreeMap, ic, query, update
 from tests import (
@@ -64,9 +66,19 @@ def run_test(module_name: str, test_name: str = None, test_var: str = None) -> i
     return globals()[f"test_{module_name}"].run(test_name, test_var)
 
 
+# What an upgrade itself writes: basilisk's post_upgrade runs
+# Database.check_upgrade_compatibility(), which stores the entity schema.
+UPGRADE_KEYS = ("_system@_schema", "_system@_schema_hash")
+
+
 @query
 def dump_json() -> str:
-    return Database.get_instance().raw_dump_json()
+    """The store without UPGRADE_KEYS: entrypoint.sh compares it across an
+    upgrade, which must change nothing else."""
+    dump = json.loads(Database.get_instance().raw_dump_json())
+    for key in UPGRADE_KEYS:
+        dump.pop(key, None)
+    return json.dumps(dump)
 
 
 @query

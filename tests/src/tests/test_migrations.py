@@ -1050,7 +1050,8 @@ class TestMigrations:
         assert Ticket.count_by("status", "closed") == 0
 
     def test_migrated_alias_value_finds_the_row(self):
-        """A row whose alias value migrate() changes is found by the new value."""
+        """A row whose alias value migrate() changes is found by the new value,
+        and no longer by the old one."""
 
         class Tag(Entity):
             __alias__ = "label"
@@ -1075,6 +1076,47 @@ class TestMigrations:
         Database.get_instance().clear_registry()
 
         assert Tag["URGENT"]._id == tag_id
+        assert Tag["urgent"] is None
+
+    def test_after_the_alias_moves_rebuild_alias_index_finds_every_row(self):
+        """A row is filed under its alias value when it is saved. After
+        __alias__ moves to another field, the rows saved before are found by
+        it once rebuild_alias_index has run, and are no longer filed under the
+        old field."""
+
+        class Place(Entity):
+            __alias__ = "code"
+            code = String()
+            name = String()
+
+        Place(code="vlc", name="Valencia")
+        Place(code="bcn", name="Barcelona")
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Place(Entity):  # the same type, new code; nothing to migrate
+            __alias__ = "name"
+            code = String()
+            name = String()
+
+        db.register_entity_type(Place)
+        assert Place["Valencia"] is None
+
+        cursor = 1
+        while cursor is not None:
+            cursor = Place.rebuild_alias_index(
+                from_id=cursor, batch=1, old_alias="code"
+            )
+        db.clear_registry()
+
+        assert Place["Valencia"]._id == "1"
+        assert Place["Barcelona"]._id == "2"
+        assert db.load("Place_code_alias", "vlc") is None
+
+        class Unaliased(Entity):
+            name = String()
+
+        Tester.assert_raises(ValueError, Unaliased.rebuild_alias_index)
 
     def _cfg_rows_one_of_which_migrate_cannot_read(self):
         """Three rows stored at version 1, and the version 2 code, whose

@@ -592,7 +592,19 @@ class Entity:
             old = None if old is None else str(old)
             if old != new:
                 self._move_reverse_entry(name, old, new)
+        alias = getattr(type(self), "__alias__", None)
+        if alias:
+            old = stored.get(alias)
+            if old is not None and old != getattr(self, alias, None):
+                self._drop_alias_entry(alias, old)  # the save filed the new value
         self._sync_sorted()
+
+    def _drop_alias_entry(self, field: str, value: Any) -> None:
+        """Remove the alias entry of ``value`` under ``field``, if it names this row."""
+        db = self.db()
+        key = self._alias_key(field)
+        if db.load(key, str(value)) == self._id:
+            db.delete(key, str(value))
 
     def _move_reverse_entry(
         self, name: str, old: Optional[str], new: Optional[str]
@@ -843,6 +855,70 @@ class Entity:
     def _rebuild_field_indexes(
         cls: Type[T], fields: List[str], from_id: int, batch: int
     ) -> Optional[int]:
+        db = cls.db()
+        type_name = cls.get_full_type_name()
+
+        def index(entity):
+            for field in fields:
+                value = getattr(entity, field, None)
+                if value is not None:
+                    db.field_index_add(type_name, field, str(value), entity._id)
+
+        return cls._for_each_in_batch(from_id, batch, index)
+
+    @classmethod
+    def rebuild_alias_index(
+        cls: Type[T],
+        from_id: int = 1,
+        batch: int = 200,
+        old_alias: Optional[str] = None,
+    ) -> Optional[int]:
+        """File one batch of entities under their alias value; resumable.
+
+        A row is filed under its alias value when it is saved. After
+        ``__alias__`` moves to another field (or is first set), the rows saved
+        before are not found by the new field's values until this has run over
+        them. Spread it over update calls as ``rebuild_field_index`` is (a
+        query's writes are discarded):
+
+            cursor = 1
+            while cursor is not None:
+                cursor = Realm.rebuild_alias_index(from_id=cursor, old_alias="id")
+
+        With ``old_alias``, each row's entry under that field is removed.
+        Idempotent.
+
+        Returns:
+            The from_id for the next batch, or None when the rebuild is done.
+
+        Raises:
+            ValueError: If the class has no ``__alias__``.
+        """
+        alias = getattr(cls, "__alias__", None)
+        if not alias:
+            raise ValueError(f"{cls.__name__} has no __alias__")
+        db = cls.db()
+
+        def file_under_alias(entity):
+            value = getattr(entity, alias, None)
+            if value is not None:
+                db.save(cls._alias_key(), value, entity._id)
+            if old_alias and old_alias != alias:
+                old_value = getattr(entity, old_alias, None)
+                if old_value is not None:
+                    entity._drop_alias_entry(old_alias, old_value)
+
+        return cls._for_each_in_batch(from_id, batch, file_under_alias)
+
+    @classmethod
+    def _for_each_in_batch(
+        cls: Type[T], from_id: int, batch: int, action: Callable[[T], None]
+    ) -> Optional[int]:
+        """Call ``action`` on each live entity of one batch from ``from_id``.
+
+        Returns:
+            The from_id for the next batch, or None after the last.
+        """
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
         if batch < 1:
@@ -852,15 +928,10 @@ class Entity:
         if max_id == 0 or from_id > max_id:
             return None
 
-        db = cls.db()
-        type_name = cls.get_full_type_name()
         # One range read per batch of *live* entities (deleted ids cost nothing)
         entities = cls.load_some(from_id, batch)
         for entity in entities:
-            for field in fields:
-                value = getattr(entity, field, None)
-                if value is not None:
-                    db.field_index_add(type_name, field, str(value), entity._id)
+            action(entity)
 
         if len(entities) < batch:
             return None

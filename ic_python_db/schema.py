@@ -26,6 +26,7 @@ class ChangeType(Enum):
     ENTITY_ADDED = "entity_added"
     ENTITY_REMOVED = "entity_removed"
     VERSION_CHANGED = "version_changed"
+    ALIAS_CHANGED = "alias_changed"
 
 
 @dataclass
@@ -154,6 +155,7 @@ def build_schema(entity_types: Dict[str, Type]) -> Dict[str, Any]:
 
         entity_desc: Dict[str, Any] = {
             "version": entity_cls.__version__,
+            "alias": getattr(entity_cls, "__alias__", None),
             "fields": {},
             "relationships": {},
         }
@@ -250,6 +252,12 @@ def diff_schemas(
                 )
             )
 
+        # A schema stored before 0.17 does not record the alias
+        if "alias" in old_entity:
+            _diff_alias(
+                entity_type, old_entity["alias"], new_entity.get("alias"), changes
+            )
+
         _diff_fields(
             entity_type,
             old_entity.get("fields", {}),
@@ -264,6 +272,37 @@ def diff_schemas(
         )
 
     return changes
+
+
+def _diff_alias(
+    entity_type: str,
+    old_alias: Optional[str],
+    new_alias: Optional[str],
+    changes: List[SchemaChange],
+) -> None:
+    """A row is filed under its alias value when saved: after the alias moves,
+    rows saved before are not found by the new field until they are refiled."""
+    if old_alias == new_alias:
+        return
+    if new_alias is None:
+        reason = "Alias removed — the old alias entries are no longer read"
+    else:
+        reason = (
+            f"Alias moved {old_alias} → {new_alias}: rows saved before are not "
+            f"found by {new_alias} until "
+            f"{entity_type}.rebuild_alias_index(old_alias={old_alias!r}) has run"
+        )
+    changes.append(
+        SchemaChange(
+            entity_type=entity_type,
+            field=None,
+            change_type=ChangeType.ALIAS_CHANGED,
+            old_value=old_alias,
+            new_value=new_alias,
+            safe=new_alias is None,
+            reason=reason,
+        )
+    )
 
 
 def _diff_fields(

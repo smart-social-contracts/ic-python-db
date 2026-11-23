@@ -398,6 +398,33 @@ class TestSchema:
 
     # ── Upgrade compatibility enforcement ──────────────────────────────
 
+    def test_diff_alias_moved(self):
+        """An alias moved to another field is breaking (rows saved before are
+        not found by it); a removed one is not; and a schema stored before the
+        alias was recorded reports no change."""
+        old = {
+            "Place": {"version": 1, "alias": "code", "fields": {}, "relationships": {}}
+        }
+        moved = {
+            "Place": {"version": 1, "alias": "name", "fields": {}, "relationships": {}}
+        }
+        removed = {
+            "Place": {"version": 1, "alias": None, "fields": {}, "relationships": {}}
+        }
+        unrecorded = {"Place": {"version": 1, "fields": {}, "relationships": {}}}
+
+        changes = diff_schemas(old, moved)
+        assert [c.change_type for c in changes] == [ChangeType.ALIAS_CHANGED]
+        assert changes[0].safe is False
+        assert "rebuild_alias_index(old_alias='code')" in changes[0].reason
+
+        changes = diff_schemas(old, removed)
+        assert [(c.change_type, c.safe) for c in changes] == [
+            (ChangeType.ALIAS_CHANGED, True)
+        ]
+
+        assert diff_schemas(unrecorded, moved) == []
+
     def test_check_upgrade_first_deploy(self):
         """Test that first deployment (no stored schema) always succeeds."""
 

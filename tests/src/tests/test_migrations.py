@@ -1209,6 +1209,37 @@ class TestMigrations:
         assert [a.name for a in accounts] == ["first", "fourth"]
         assert next_from_id is None
 
+    def test_a_row_that_cannot_be_built_is_not_left_in_the_identity_map(self):
+        """An entity is registered before its fields are set. In a canister
+        the identity map keeps what it holds until the message ends (weak
+        references do not free entities there), so one that failed half-way
+        must leave it: the next load of its id, or a page, returned the
+        half-built entity as if it were the row. A plain dict stands in for
+        the canister's map here."""
+
+        class Ledger(Entity):
+            name = String()
+            entries = OneToMany("LedgerEntry", "ledger")
+
+        class LedgerEntry(Entity):
+            ledger = ManyToOne("Ledger", "entries")
+
+        db = Database.get_instance()
+        db.save(
+            "Ledger",
+            "1",
+            {"_type": "Ledger", "_id": "1", "name": "x", "entries": ["7"]},
+        )
+        db.save("_system", "Ledger_id", "1")
+        registry = db._entity_registry
+        db._entity_registry = {}
+        try:
+            assert Ledger.load_some(1, 10) == []  # skipped: the OneToMany has no setter
+            assert db.get_entity("Ledger", "1") is None
+            assert Ledger.page(1, 10) == ([], None)
+        finally:
+            db._entity_registry = registry
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestMigrations)

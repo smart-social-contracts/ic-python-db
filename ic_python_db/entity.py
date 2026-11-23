@@ -254,17 +254,26 @@ class Entity:
         # (indexes are already intact). Explicit updates later — including
         # deserialize() upserts — run the full descriptor path.
         self._hydrating = self._loaded
-        # Set additional attributes
-        for k, v in kwargs.items():
-            if not k.startswith("_"):
-                setattr(self, k, v)
-        if self._loaded and hasattr(self, "_restore_state"):
-            self._restore_state()
-        self._do_not_save = False
-        self._hydrating = False
+        try:
+            # Set additional attributes
+            for k, v in kwargs.items():
+                if not k.startswith("_"):
+                    setattr(self, k, v)
+            if self._loaded and hasattr(self, "_restore_state"):
+                self._restore_state()
+            self._do_not_save = False
+            self._hydrating = False
 
-        if not self._loaded:
-            self._save()
+            if not self._loaded:
+                self._save()
+        except Exception:
+            # It was registered above, before its fields. In a canister the
+            # identity map keeps it until the message ends, so the next load of
+            # this id would return the half-built entity.
+            db = self.db()
+            if db.get_entity(self._type, self._id) is self:
+                db.unregister_entity(self._type, self._id)
+            raise
 
     @classmethod
     def new(cls, **kwargs):

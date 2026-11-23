@@ -587,7 +587,31 @@ class Entity:
                     db.field_index_remove(self._type, field, str(old), self._id)
                 if new is not None:
                     db.field_index_add(self._type, field, str(new), self._id)
+        for name in self._foreign_key_names():
+            old, new = stored.get(name), self.__dict__.get(f"_rel_{name}")
+            old = None if old is None else str(old)
+            if old != new:
+                self._move_reverse_entry(name, old, new)
         self._sync_sorted()
+
+    def _move_reverse_entry(
+        self, name: str, old: Optional[str], new: Optional[str]
+    ) -> None:
+        """Move this row's entry in the reverse index of the row that its
+        reference ``name`` names, from ``old`` to ``new``.
+
+        A reference migrate() set (renamed, added or pointed elsewhere) is
+        stored by the save, but the other side of the relation reads the
+        reverse index, which only a write through the relation updates."""
+        relation = getattr(type(self), name)
+        db = self.db()
+        for ref, move in ((old, db.reverse_index_remove), (new, db.reverse_index_add)):
+            if ref is None:
+                continue
+            for type_name in relation._get_allowed_types():
+                if db._entity_types.get(type_name) and db.load(type_name, ref):
+                    move(type_name, ref, relation.reverse_name, self._id)
+                    break
 
     @classmethod
     def _require_unpaged(cls, method: str) -> None:

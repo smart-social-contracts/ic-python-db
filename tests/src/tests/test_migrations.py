@@ -556,8 +556,59 @@ class TestMigrations:
         assert user_data["user_profile"] == profile_id
         assert "profile" not in user_data
         assert loaded_user.user_profile._id == profile_id
+        # The other side reads the reverse index, which the migration moved
+        db.clear_registry()
+        assert Profile.load(profile_id).user._id == user_id
         # Note: In the new architecture, only the owning side stores the FK.
         # The inverse side (Profile) reads from the reverse index.
+
+    def test_a_renamed_many_to_one_is_listed_by_the_other_side(self):
+        """Rows whose reference migrate() renames are listed by the one-to-many
+        side once they are migrated."""
+
+        class Team(Entity):
+            __version__ = 1
+            name = String()
+            employees = OneToMany("Worker", "department")
+
+        class Worker(Entity):
+            __version__ = 1
+            name = String()
+            department = ManyToOne("Team", "employees")
+
+        team = Team(name="Ops")
+        team_id = team._id
+        Worker(name="Ana", department=team)
+        Worker(name="Ben", department=team)
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Team(Entity):  # the same types, new code
+            __version__ = 2
+            name = String()
+            members = OneToMany("Worker", "team")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                return obj
+
+        class Worker(Entity):
+            __version__ = 2
+            name = String()
+            team = ManyToOne("Team", "members")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if "department" in obj:
+                    obj["team"] = obj.pop("department")
+                return obj
+
+        db.register_entity_type(Team)
+        db.register_entity_type(Worker)
+        Worker.load_some(1, 10)  # migrates and saves both
+        db.clear_registry()
+
+        assert sorted(w.name for w in Team.load(team_id).members) == ["Ana", "Ben"]
 
     def test_migration_persistence_verification(self):
         """Test that migration changes are persisted to database."""

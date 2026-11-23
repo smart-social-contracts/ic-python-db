@@ -70,7 +70,7 @@ A row is migrated when it is loaded. If `migrate()` raises, `load()`, `load_some
 
 ### Layer 3: Upgrade Enforcement (The Safety Net)
 
-This is the guard that prevents you from deploying a dangerous change you forgot to handle. You enable it by calling `check_upgrade_compatibility()` in your canister's `post_upgrade`:
+This is the guard that prevents you from deploying a dangerous change you forgot to handle. A canister built with Basilisk runs it for you: Basilisk wraps `post_upgrade` (yours, if you have one) with `check_upgrade_compatibility()` and traps when it raises. Calling it yourself does the same:
 
 ```python
 from basilisk import post_upgrade
@@ -88,7 +88,7 @@ Here's what it does, step by step:
 2. Looks at your current Entity classes and builds a new schema
 3. Compares the two and lists every difference
 4. For each dangerous difference, checks: "Does this entity have a `migrate()` method?"
-5. If any dangerous change has no `migrate()` → the upgrade is **rejected**
+5. If any dangerous change has no `migrate()` → the upgrade is **rejected**. A removed Entity class that still has rows is rejected even then: no `migrate()` can reach its rows.
 
 When the upgrade is rejected, `post_upgrade` crashes (raises `SchemaIncompatibleError`). The IC sees the crash and **rolls back the entire upgrade** — your canister goes back to the previous code and data, as if nothing happened. Your data is safe.
 
@@ -102,7 +102,10 @@ When the upgrade is rejected, `post_upgrade` crashes (raises `SchemaIncompatible
 | Changed a field's type (e.g. `Integer` → `String`) | **No** | Old data is the wrong type |
 | Changed constraints (e.g. `max_length`) | Yes | Only affects future writes |
 | Added a new Entity class | Yes | No old data exists |
-| Removed an Entity class | Yes | Old data stays but is unused |
+| Removed an Entity class that has **no** rows | Yes | Nothing is left behind |
+| Removed (or renamed) an Entity class that **has** rows | **No**, whatever `migrate()` says | Its rows would be stored and read by nothing. Delete them first, or keep the class |
+| Moved `__alias__` to another field (or added it) | **No** | Rows saved before are not found by the new field until `rebuild_alias_index(old_alias=...)` has run over them |
+| Removed `__alias__` | Yes | The old alias entries are no longer read |
 | Added a relationship | Yes | No old references exist |
 | Removed a relationship | Yes | Old references are just ignored |
 | Changed relationship type (e.g. `OneToOne` → `ManyToMany`) | **No** | Old references have the wrong structure |
@@ -110,6 +113,13 @@ When the upgrade is rejected, `post_upgrade` crashes (raises `SchemaIncompatible
 **Safe** = ic-python-db handles it automatically. No action needed.
 
 **Dangerous** = You must write a `migrate()` method. If you don't, the upgrade is blocked.
+
+## What a migration checks
+
+- **Values `migrate()` sets are checked as a write checks them.** A value its field refuses (too long, the wrong type) is a `MigrationError` naming the row and the field, and nothing is stored. Values `migrate()` leaves alone are not checked again.
+- **References `migrate()` sets are linked on both sides.** A renamed `ManyToOne` or `OneToOne` is found from the other side once its row is migrated.
+- **A row of a newer version is never overwritten.** After a rollback, the older code reads such a row as stored, and a write to it raises `MigrationError`: stamping it with the older version would have the newer code migrate it a second time.
+- **Exports carry their version.** `serialize()` writes `__version__`, and `deserialize()` migrates a record from it. A record without one is taken to be of the current version.
 
 ## First Deploy
 

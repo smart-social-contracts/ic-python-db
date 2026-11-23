@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A row stored by newer code is never overwritten.** After a rollback, the older code read a row of a higher `__version__`, ran `migrate()` with `from_version > to_version`, and saved it under its own, older version. Rolled forward again, the newer code migrated it a second time: a migration that is not idempotent applied twice (500 cents read as 50000). Such a row is now loaded as stored and never saved: a write to it raises `MigrationError`, and `deserialize()` refuses before it merges anything. Reads and listings work as before.
+- **`serialize()` writes `__version__`, and `deserialize()` migrates the way `load()` does.** An export carried no version and an import took it to be version 1, so importing current data re-ran every step of `migrate()` on it (a v2 that renamed `description` to `manifesto` emptied the manifesto). A record without `__version__` is now taken to be of the current version, a record of a newer version is refused, and the others are migrated by the same code as `load()`: a `migrate()` that raises is a `MigrationError` naming the record, and defaults fill the fields it did not set.
+- **Values `migrate()` sets are checked as a write checks them.** A row is built from storage without checks, and the save that persisted a migration did not check either, so a wrong value was stored (25 characters in a `String(max_length=5)`, text in an `Integer`), and the row then refused an ordinary write of that same value. A refused value is now a `MigrationError` naming the row and the field; text for a number is converted, as on a write. Values `migrate()` leaves alone are not checked.
+- **A reference `migrate()` sets is linked on both sides.** A renamed (or added, or repointed) `ManyToOne` or `OneToOne` was saved in the row, but the other side reads the reverse index, which stayed as it was: `profile.user` and `team.members` found nothing. The migration now moves the reverse-index entry. Entries under a relation name the class no longer has stay, unread.
+- **An alias value `migrate()` changes no longer leaves the old entry behind**, naming the row.
+- **An entity that fails half-way through being built leaves the identity map.** The constructor registers an entity before setting its fields. In a canister the map keeps entities until the message ends, so after a listing skipped a row that could not be built (a value for a `OneToMany`, a `ManyToMany` naming a row that is gone), `page()` and `load()` of that id in the same message returned the half-built entity, with every field after the failing one missing. It surfaced when `test_migrations` first ran in a canister.
+
+### Changed
+
+- **The upgrade check refuses removing an entity type that has rows.** A renamed class passed as safe while the rows of the old name stayed stored and read by nothing. Basilisk runs this check in every canister's `post_upgrade` and traps when it raises, so such an upgrade is now rolled back. It is not waived by `migrate()`.
+- **The schema records each type's `__alias__`**, and the upgrade check reports a moved alias as breaking (`ChangeType.ALIAS_CHANGED`), naming the rebuild to run. A removed alias is safe. Every stored schema hash changes once.
+- `serialize()` output has a `__version__` key.
+
+### Added
+
+- `Entity.rebuild_alias_index(from_id, batch, old_alias)`: files rows under their alias value, in batches, like `rebuild_field_index`. After `__alias__` moves to another field, rows saved before are found by it once this has run; with `old_alias`, their entries under the old field are removed.
+
+### Upgrading from 0.16
+
+1. A schema stored by 0.16 records no alias, so the first upgrade to this version reports no alias change. If an alias moved in that same upgrade, run `rebuild_alias_index(old_alias=...)` for the type anyway.
+2. Code that wrote to rows after a rollback now gets `MigrationError`. Roll forward, or migrate those rows' data back by hand.
+3. A `migrate()` that set a value its field refuses now raises `MigrationError` on load. Before, the value was stored.
+4. Tests that compare `serialize()` output to a dict need the `__version__` key, and tests that compare a stored schema need `alias` in each type.
+
 ## 0.16.0
 
 ### Fixed

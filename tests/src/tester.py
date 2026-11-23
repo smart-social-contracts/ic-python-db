@@ -54,15 +54,18 @@ class Tester:
 
     @classmethod
     def assert_raises(cls, exception, func, *args, **kwargs):
-        """Assert that a function raises a specific exception."""
+        """Fail the test unless func raises exception.
+
+        Raises AssertionError rather than returning False: every caller uses
+        it as a statement, so a returned False failed nothing."""
         try:
             func(*args, **kwargs)
         except exception:
             logger.info(f"{func.__name__} raised {exception.__name__} as expected")
-            return True
+            return
         except Exception as e:
-            logger.error(f"{func.__name__} raised an unexpected exception: {e}")
-            return False
-        else:
-            logger.error(f"{func.__name__} did not raise {exception.__name__}")
-            return False
+            raise AssertionError(
+                f"{func.__name__} raised {type(e).__name__} ({e}), "
+                f"expected {exception.__name__}"
+            ) from e
+        raise AssertionError(f"{func.__name__} did not raise {exception.__name__}")

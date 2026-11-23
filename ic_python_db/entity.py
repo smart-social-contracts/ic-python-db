@@ -136,6 +136,9 @@ class Entity:
     _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
     _migrating = False  # True while a save persists a migration made on load
+    # The version of a row loaded from newer code than this (after a rollback);
+    # such an entity is never saved (see _hydrate)
+    _newer_version: Optional[int] = None
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
 
@@ -300,6 +303,15 @@ class Entity:
                     f"Only the owner can update this entity. Current owner: {self._owner}"
                 )
 
+    def _refuse_if_newer(self) -> None:
+        """Raise MigrationError if this row was stored by newer code."""
+        if self._newer_version is not None:
+            raise MigrationError(
+                f"{self._type}@{self._id} is stored at version "
+                f"{self._newer_version}, newer than this code's "
+                f"{self.__class__.__version__}: refusing to overwrite it"
+            )
+
     def _save(
         self,
     ) -> "Entity":
@@ -310,7 +322,9 @@ class Entity:
 
         Raises:
             PermissionError: If TimestampedMixin is used and caller is not the owner
+            MigrationError: If the row was stored by newer code (see _hydrate)
         """
+        self._refuse_if_newer()
 
         # Use full type name (including namespace) for system counters and storage
         type_name = self._type
@@ -484,6 +498,14 @@ class Entity:
         type_name = cls.get_full_type_name()
         stored_version = data.get("__version__", 1)
         current_version = cls.__version__
+
+        if stored_version > current_version:
+            # Written by newer code: this code was rolled back. Read the row as
+            # stored and never write it, since a save would stamp it with this
+            # older version and the newer code would then migrate it again.
+            entity = cls(**data, _loaded=True)
+            entity._newer_version = stored_version
+            return entity
 
         if stored_version != current_version:
             logger.debug(
@@ -1474,6 +1496,7 @@ class Entity:
             # Refuse now: the fields merged below run hooks and move index
             # entries, and the save that would refuse comes after all of them
             existing_entity._check_owner()
+            existing_entity._refuse_if_newer()
 
             # Store old alias value for cleanup if it changes
             old_alias_value = None

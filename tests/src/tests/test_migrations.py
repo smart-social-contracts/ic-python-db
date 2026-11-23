@@ -728,44 +728,54 @@ class TestMigrations:
             assert f"Product@{product_id}" in str(e)
 
     def test_migration_downgrade_scenario(self):
-        """Test behavior when loading newer version with older code."""
+        """A row written by newer code (the code was rolled back) is read as
+        stored and never overwritten: the older code would stamp it with its
+        own version, and the newer code would then migrate it a second time."""
 
-        class Product(Entity):
+        class Account(Entity):
             __version__ = 2
-            name = String()
-            price = Float(default=0.0)
-
-        product = Product(name="Widget", price=10.0)
-        product_id = product._id
-
-        # Verify v2 is stored
-        db = Database.get_instance()
-        stored_data = db.load("Product", product_id)
-        assert stored_data["__version__"] == 2
-
-        Database.get_instance().clear_registry()
-
-        # Simulate rollback to v1 code
-        class Product(Entity):
-            __version__ = 1
-            name = String()
+            balance = Integer()
 
             @classmethod
             def migrate(cls, obj, from_version, to_version):
-                # Downgrade scenario: from_version=2, to_version=1
-                # Default implementation does nothing
+                if from_version < 2:
+                    obj["balance"] = obj["balance"] * 100  # whole units to cents
                 return obj
 
-        Database.get_instance().register_entity_type(Product)
+        account_id = Account(balance=500)._id
+        db = Database.get_instance()
+        written = db.load("Account", account_id)
+        db.clear_registry()
 
-        # Loading v2 data with v1 code
-        # This will trigger migrate(data, from_version=2, to_version=1)
-        loaded = Product.load(product_id)
+        class Account(Entity):  # rolled back to the version 1 code
+            __version__ = 1
+            balance = Integer()
 
-        assert loaded is not None
-        assert loaded.name == "Widget"
-        # price field exists in data but not in v1 schema
-        # Entity should load without error (extra fields ignored)
+        db.register_entity_type(Account)
+        old = Account.load(account_id)
+        assert old.balance == 500
+        assert db.load("Account", account_id) == written
+        assert [a._id for a in Account.load_some(1, 10)] == [account_id]
+        try:
+            old.balance = 7
+            assert False, "older code overwrote a row of a newer version"
+        except errors.MigrationError as e:
+            assert f"Account@{account_id}" in str(e)
+        assert db.load("Account", account_id) == written
+        db.clear_registry()
+
+        class Account(Entity):  # rolled forward again
+            __version__ = 2
+            balance = Integer()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if from_version < 2:
+                    obj["balance"] = obj["balance"] * 100
+                return obj
+
+        db.register_entity_type(Account)
+        assert Account.load(account_id).balance == 500
 
     def test_migration_deserialize_simple(self):
         """Test migration during deserialize with simple properties."""

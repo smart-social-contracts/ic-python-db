@@ -822,6 +822,69 @@ class TestMigrations:
         assert product_db_data["__version__"] == 2
         assert product_db_data["price"] == 19.99
 
+    def _realm_class_whose_v2_renamed_description(self):
+        class Realm(Entity):
+            __version__ = 2
+            name = String()
+            manifesto = String()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if from_version < 2:
+                    obj["manifesto"] = obj.pop("description", "")
+                return obj
+
+        Database.get_instance().register_entity_type(Realm)
+        return Realm
+
+    def test_an_export_of_current_data_imports_unchanged(self):
+        """serialize() writes the version, so deserialize() does not migrate
+        current data again (which emptied a renamed field)."""
+        Realm = self._realm_class_whose_v2_renamed_description()
+        exported = Realm(name="Valencia", manifesto="Our manifesto").serialize()
+        assert exported["__version__"] == 2
+
+        Database.get_instance().clear()
+        Realm = self._realm_class_whose_v2_renamed_description()
+        imported = Realm.deserialize(exported)
+
+        assert imported.manifesto == "Our manifesto"
+        stored = Database.get_instance().load("Realm", imported._id)
+        assert stored["manifesto"] == "Our manifesto"
+        assert stored["__version__"] == 2
+
+    def test_a_record_without_a_version_is_taken_to_be_current(self):
+        Realm = self._realm_class_whose_v2_renamed_description()
+        imported = Realm.deserialize(
+            {"_type": "Realm", "_id": "1", "name": "Valencia", "manifesto": "Ours"}
+        )
+        assert imported.manifesto == "Ours"
+
+    def test_deserialize_migrates_as_load_does(self):
+        """A record of an older version is migrated, a migrate() that raises
+        is a MigrationError naming the record, and a record of a newer
+        version is refused before anything is stored."""
+        Realm = self._realm_class_whose_v2_renamed_description()
+        old = {"_type": "Realm", "_id": "1", "name": "A", "description": "Ours"}
+        assert Realm.deserialize({**old, "__version__": 1}).manifesto == "Ours"
+
+        broken = {"_type": "Realm", "_id": "2", "name": "B", "__version__": 1}
+        Realm.migrate = classmethod(lambda cls, obj, f, t: obj["description"])
+        try:
+            Realm.deserialize(broken)
+            assert False, "a migrate() that raises was not reported"
+        except errors.MigrationError as e:
+            assert "Realm@2" in str(e)
+            assert isinstance(e.__cause__, KeyError)
+
+        newer = {"_type": "Realm", "_id": "3", "name": "C", "__version__": 3}
+        try:
+            Realm.deserialize(newer)
+            assert False, "a record of a newer version was imported"
+        except errors.MigrationError as e:
+            assert "Realm@3" in str(e)
+        assert Database.get_instance().load("Realm", "3") is None
+
     def test_migration_large_version_jump(self):
         """Test migration with large version jump (v1 to v10)."""
 

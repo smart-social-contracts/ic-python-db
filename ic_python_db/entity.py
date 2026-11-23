@@ -365,8 +365,7 @@ class Entity:
         if not self._do_not_save:
             logger.debug(f"Saving entity {self._type}@{self._id} to database")
             db = self.db()
-            persisted_data = {**data, "__version__": self.__class__.__version__}
-            db.save(self._type, self._id, persisted_data)
+            db.save(self._type, self._id, data)
             if hasattr(self.__class__, "__alias__") and self.__class__.__alias__:
                 alias_field = self.__class__.__alias__
                 if hasattr(self, alias_field):
@@ -450,6 +449,32 @@ class Entity:
         return obj
 
     @classmethod
+    def _migrate_row(cls, label: str, data: dict, stored_version: int) -> dict:
+        """A copy of ``data`` migrated from ``stored_version`` to this class's
+        version: ``migrate()``, then the defaults of fields it did not set.
+
+        Shared by ``_hydrate`` (a stored row) and ``deserialize`` (a record);
+        ``label`` names the row in errors (``Type@id``). ``data`` is left as
+        it was, so the caller can compare the two.
+
+        Raises:
+            MigrationError: If ``migrate()`` raises.
+        """
+        current_version = cls.__version__
+        logger.debug(f"Migrating {label} from version {stored_version}")
+        try:
+            # Developer logic first; defaults only fill what it left out
+            migrated = cls.migrate(dict(data), stored_version, current_version)
+        except Exception as e:
+            raise MigrationError(
+                f"{label}: migrate() from version {stored_version} to "
+                f"{current_version} raised {type(e).__name__}: {e}"
+            ) from e
+        migrated = cls._auto_migrate_defaults(migrated)
+        migrated["__version__"] = current_version
+        return migrated
+
+    @classmethod
     def load(
         cls: Type[T], entity_id: str = None, level: int = LEVEL_MAX_DEFAULT
     ) -> Optional[T]:
@@ -508,26 +533,8 @@ class Entity:
             return entity
 
         if stored_version != current_version:
-            logger.debug(
-                f"Version mismatch for {type_name}@{entity_id}: "
-                f"stored={stored_version}, current={current_version}"
-            )
-            stored = dict(data)  # migrate() may change data in place
-            # Apply custom migration first (developer logic takes priority)
-            try:
-                data = cls.migrate(data, stored_version, current_version)
-            except Exception as e:
-                raise MigrationError(
-                    f"{type_name}@{entity_id}: migrate() from version "
-                    f"{stored_version} to {current_version} raised "
-                    f"{type(e).__name__}: {e}"
-                ) from e
-            # Auto-inject defaults for new fields not handled by migrate()
-            data = cls._auto_migrate_defaults(data)
-            data["__version__"] = current_version
-            logger.debug(
-                f"Migrated {type_name}@{entity_id} to version {current_version}"
-            )
+            stored = data
+            data = cls._migrate_row(f"{type_name}@{entity_id}", data, stored_version)
 
         # Create instance first
         entity = cls(**data, _loaded=True)
@@ -1299,11 +1306,13 @@ class Entity:
         # Get mixin data first if available
         data = super().serialize() if hasattr(super(), "serialize") else {}
 
-        # Add core entity data
+        # Add core entity data. A row loaded from newer code keeps the version
+        # it was stored at: an export of it is of that version, not of this code's.
         data.update(
             {
                 "_type": self._type,
                 "_id": self._id,
+                "__version__": self._newer_version or self.__class__.__version__,
             }
         )
 
@@ -1425,8 +1434,14 @@ class Entity:
         Returns:
             Entity instance (either updated existing or newly created)
 
+        A record carries the version it was written at (``__version__``, as
+        ``serialize()`` writes it) and is migrated from it; one without is
+        taken to be of the current version.
+
         Raises:
             ValueError: If data is invalid or entity type not found
+            MigrationError: If the record is of a newer version than the class,
+                or its ``migrate()`` raises
         """
         if not isinstance(data, dict):
             raise ValueError("Data must be a dictionary")
@@ -1457,17 +1472,19 @@ class Entity:
                 f"Entity type mismatch: expected {full_type_name} or {cls.__name__}, got {entity_type}"
             )
 
-        stored_version = data.get("__version__", 1)
-        current_version = cls.__version__
-
-        if stored_version != current_version:
-            logger.debug(
-                f"Version mismatch during deserialize for {entity_type}: "
-                f"stored={stored_version}, current={current_version}"
+        # serialize() writes the version. A record without one was written by
+        # hand, or by serialize() before it did: take it to be of this code's
+        # version, since migrating it from version 1 re-applies every step to
+        # data that may already be current.
+        stored_version = data.get("__version__", cls.__version__)
+        label = f"{entity_type}@{data.get('_id')}"
+        if stored_version > cls.__version__:
+            raise MigrationError(
+                f"{label}: the record is of version {stored_version}, newer "
+                f"than this code's {cls.__version__}"
             )
-            data = cls.migrate(data, stored_version, current_version)
-            data["__version__"] = current_version
-            logger.debug(f"Migrated {entity_type} to version {current_version}")
+        if stored_version != cls.__version__:
+            data = cls._migrate_row(label, data, stored_version)
 
         # Try to find existing entity
         existing_entity = None

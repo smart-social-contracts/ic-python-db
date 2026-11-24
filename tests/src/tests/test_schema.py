@@ -398,6 +398,33 @@ class TestSchema:
 
     # ── Upgrade compatibility enforcement ──────────────────────────────
 
+    def test_diff_alias_moved(self):
+        """An alias moved to another field is breaking (rows saved before are
+        not found by it); a removed one is not; and a schema stored before the
+        alias was recorded reports no change."""
+        old = {
+            "Place": {"version": 1, "alias": "code", "fields": {}, "relationships": {}}
+        }
+        moved = {
+            "Place": {"version": 1, "alias": "name", "fields": {}, "relationships": {}}
+        }
+        removed = {
+            "Place": {"version": 1, "alias": None, "fields": {}, "relationships": {}}
+        }
+        unrecorded = {"Place": {"version": 1, "fields": {}, "relationships": {}}}
+
+        changes = diff_schemas(old, moved)
+        assert [c.change_type for c in changes] == [ChangeType.ALIAS_CHANGED]
+        assert changes[0].safe is False
+        assert "rebuild_alias_index(old_alias='code')" in changes[0].reason
+
+        changes = diff_schemas(old, removed)
+        assert [(c.change_type, c.safe) for c in changes] == [
+            (ChangeType.ALIAS_CHANGED, True)
+        ]
+
+        assert diff_schemas(unrecorded, moved) == []
+
     def test_check_upgrade_first_deploy(self):
         """Test that first deployment (no stored schema) always succeeds."""
 
@@ -491,6 +518,39 @@ class TestSchema:
         type_changes = [c for c in changes if c.change_type == ChangeType.TYPE_CHANGED]
         assert len(type_changes) == 1
         assert type_changes[0].safe is False
+
+    def test_check_upgrade_refuses_removing_a_type_that_has_rows(self):
+        """A class renamed (or dropped) leaves its rows stored and read by
+        nothing: while any are stored, its removal is breaking. Once they are
+        deleted, removing it passes."""
+
+        class Proposal(Entity):
+            title = String()
+
+        Proposal(title="a")
+        Proposal(title="b")
+        db = Database.get_instance()
+        db.check_upgrade_compatibility()
+        db.clear_registry()
+        db._entity_types.pop("Proposal")
+
+        class Motion(Entity):  # the same data under a new name
+            title = String()
+
+        db.register_entity_type(Motion)
+        try:
+            db.check_upgrade_compatibility()
+            assert False, "removing a type with stored rows passed"
+        except SchemaIncompatibleError as e:
+            assert "Proposal" in str(e) and "2 stored rows" in str(e), str(e)
+
+        db.register_entity_type(Proposal)
+        for proposal_id in ("1", "2"):
+            Proposal.load(proposal_id).delete()
+        db._entity_types.pop("Proposal")
+        changes = db.check_upgrade_compatibility()
+        removed = [c for c in changes if c.change_type == ChangeType.ENTITY_REMOVED]
+        assert [(c.entity_type, c.safe) for c in removed] == [("Proposal", True)]
 
     def test_check_upgrade_no_raise_mode(self):
         """Test raise_on_error=False returns changes without raising."""

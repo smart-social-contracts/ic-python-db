@@ -8,6 +8,16 @@ from ic_python_db import *
 from ic_python_db import errors
 
 
+def _store():
+    """A copy of every key and value in the store."""
+    return dict(Database.get_instance()._db_storage.items())
+
+
+def _changed_keys(before, after):
+    """The keys added, removed or rewritten between two copies of the store."""
+    return {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+
+
 class TestMigrations:
     def setUp(self):
         """Reset database before each test."""
@@ -42,7 +52,8 @@ class TestMigrations:
         assert stored_data["__version__"] == 3
 
     def test_migration_on_load(self):
-        """Test that migration is triggered when loading old version data."""
+        """Loading a row of an older version migrates it, and the save that
+        persists the migration rewrites that row and nothing else."""
 
         class Product(Entity):
             __version__ = 1
@@ -62,17 +73,27 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "price" not in obj:
-                        obj["price"] = 0.0
+                        obj["price"] = (
+                            2.5  # not the default, so a skipped migrate() shows
+                        )
                 return obj
 
         Database.get_instance().register_entity_type(Product)
 
+        before = _store()
         loaded = Product.load(product_id)
 
         assert loaded is not None
         assert loaded.name == "Widget"
-        assert hasattr(loaded, "price")
-        assert loaded.price == 0.0
+        assert loaded.price == 2.5
+        assert _changed_keys(before, _store()) == {f"Product@{product_id}"}
+        assert Database.get_instance().load("Product", product_id) == {
+            "_type": "Product",
+            "_id": product_id,
+            "name": "Widget",
+            "price": 2.5,
+            "__version__": 2,
+        }
 
     def test_migration_multiple_versions(self):
         """Test migration across multiple versions."""
@@ -96,11 +117,11 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "price" not in obj:
-                        obj["price"] = 0.0
+                        obj["price"] = 1.0
 
                 if from_version <= 2 and to_version >= 3:
                     if "category" not in obj:
-                        obj["category"] = "general"
+                        obj["category"] = "tools"
 
                 return obj
 
@@ -110,8 +131,8 @@ class TestMigrations:
 
         assert loaded is not None
         assert loaded.name == "Widget"
-        assert loaded.price == 0.0
-        assert loaded.category == "general"
+        assert loaded.price == 1.0
+        assert loaded.category == "tools"
 
     def test_migration_field_rename(self):
         """Test migration that renames a field."""
@@ -143,6 +164,9 @@ class TestMigrations:
         assert loaded is not None
         assert loaded.new_name == "Widget"
         assert not hasattr(loaded, "old_name")
+        stored = Database.get_instance().load("Product", product_id)
+        assert stored["new_name"] == "Widget"
+        assert "old_name" not in stored
 
     def test_migration_on_deserialize(self):
         """Test that migration is triggered during deserialization."""
@@ -224,7 +248,7 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "price" not in obj:
-                        obj["price"] = 0.0
+                        obj["price"] = 3.0
                 return obj
 
         Database.get_instance().register_entity_type(Product)
@@ -234,7 +258,15 @@ class TestMigrations:
         assert loaded_product is not None
         assert loaded_product.name == "Widget"
         assert loaded_product.description == "A useful widget"
-        assert loaded_product.price == 0.0
+        assert loaded_product.price == 3.0
+        assert Database.get_instance().load("Product", product_id) == {
+            "_type": "Product",
+            "_id": product_id,
+            "name": "Widget",
+            "description": "A useful widget",
+            "price": 3.0,
+            "__version__": 2,
+        }
 
     def test_migration_with_data_transformation(self):
         """Test migration that transforms existing data."""
@@ -269,6 +301,9 @@ class TestMigrations:
         assert loaded.name == "Widget"
         assert loaded.price_dollars == 10.0
         assert not hasattr(loaded, "price_cents")
+        stored = Database.get_instance().load("Product", product_id)
+        assert stored["price_dollars"] == 10.0
+        assert "price_cents" not in stored
 
     def test_migration_backward_compatible(self):
         """Test that entities without version field default to version 1."""
@@ -298,7 +333,8 @@ class TestMigrations:
         assert loaded.price == 5.0
 
     def test_migration_with_one_to_one_relation(self):
-        """Test migration of entity with OneToOne relationship."""
+        """Test migration of an entity that refers to another by a plain id
+        field (not a relation: see test_migration_relation_field_rename)."""
 
         class Profile(Entity):
             __version__ = 1
@@ -330,7 +366,7 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "website" not in obj:
-                        obj["website"] = ""
+                        obj["website"] = "unknown"
                 return obj
 
         class User(Entity):
@@ -343,7 +379,7 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "email" not in obj:
-                        obj["email"] = ""
+                        obj["email"] = "unknown"
                 return obj
 
         Database.get_instance().register_entity_type(Profile)
@@ -354,11 +390,11 @@ class TestMigrations:
 
         assert loaded_user is not None
         assert loaded_user.name == "Alice"
-        assert loaded_user.email == ""
+        assert loaded_user.email == "unknown"
         assert loaded_user.profile_id == profile_id  # Relation ID preserved
         assert loaded_profile is not None
         assert loaded_profile.bio == "Developer"
-        assert loaded_profile.website == ""
+        assert loaded_profile.website == "unknown"
 
     def test_migration_with_simple_properties(self):
         """Test migration adding properties to entity (no complex relations)."""
@@ -384,9 +420,9 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "approved" not in obj:
-                        obj["approved"] = True
+                        obj["approved"] = False
                     if "author" not in obj:
-                        obj["author"] = "Anonymous"
+                        obj["author"] = "imported"
                 return obj
 
         Database.get_instance().register_entity_type(Comment)
@@ -396,11 +432,11 @@ class TestMigrations:
 
         assert loaded_comment1 is not None
         assert loaded_comment1.text == "Great!"
-        assert loaded_comment1.approved is True
-        assert loaded_comment1.author == "Anonymous"
+        assert loaded_comment1.approved is False
+        assert loaded_comment1.author == "imported"
         assert loaded_comment2 is not None
         assert loaded_comment2.text == "Nice!"
-        assert loaded_comment2.approved is True
+        assert loaded_comment2.approved is False
 
     def test_migration_with_multiple_entities(self):
         """Test migrating multiple independent entities."""
@@ -431,7 +467,7 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "grade" not in obj:
-                        obj["grade"] = "A"
+                        obj["grade"] = "B"
                 return obj
 
         class Course(Entity):
@@ -443,7 +479,7 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "credits" not in obj:
-                        obj["credits"] = 3
+                        obj["credits"] = 4
                 return obj
 
         Database.get_instance().register_entity_type(Student)
@@ -455,13 +491,13 @@ class TestMigrations:
 
         assert loaded_student is not None
         assert loaded_student.name == "Bob"
-        assert loaded_student.grade == "A"
+        assert loaded_student.grade == "B"
         assert loaded_course1 is not None
         assert loaded_course1.title == "Math"
-        assert loaded_course1.credits == 3
+        assert loaded_course1.credits == 4
         assert loaded_course2 is not None
         assert loaded_course2.title == "Physics"
-        assert loaded_course2.credits == 3
+        assert loaded_course2.credits == 4
 
     def test_migration_relation_field_rename(self):
         """Test migration that renames a relation field."""
@@ -479,6 +515,7 @@ class TestMigrations:
         profile = Profile(bio="Developer")
         user = User(name="Alice", profile=profile)
         user_id = user._id
+        profile_id = profile._id
 
         Database.get_instance().clear_registry()
 
@@ -516,9 +553,62 @@ class TestMigrations:
         # Verify migration renamed the relation field in stored data (owning side only)
         db = Database.get_instance()
         user_data = db.load("User", user_id)
-        assert "user_profile" in user_data
+        assert user_data["user_profile"] == profile_id
+        assert "profile" not in user_data
+        assert loaded_user.user_profile._id == profile_id
+        # The other side reads the reverse index, which the migration moved
+        db.clear_registry()
+        assert Profile.load(profile_id).user._id == user_id
         # Note: In the new architecture, only the owning side stores the FK.
         # The inverse side (Profile) reads from the reverse index.
+
+    def test_a_renamed_many_to_one_is_listed_by_the_other_side(self):
+        """Rows whose reference migrate() renames are listed by the one-to-many
+        side once they are migrated."""
+
+        class Team(Entity):
+            __version__ = 1
+            name = String()
+            employees = OneToMany("Worker", "department")
+
+        class Worker(Entity):
+            __version__ = 1
+            name = String()
+            department = ManyToOne("Team", "employees")
+
+        team = Team(name="Ops")
+        team_id = team._id
+        Worker(name="Ana", department=team)
+        Worker(name="Ben", department=team)
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Team(Entity):  # the same types, new code
+            __version__ = 2
+            name = String()
+            members = OneToMany("Worker", "team")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                return obj
+
+        class Worker(Entity):
+            __version__ = 2
+            name = String()
+            team = ManyToOne("Team", "members")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if "department" in obj:
+                    obj["team"] = obj.pop("department")
+                return obj
+
+        db.register_entity_type(Team)
+        db.register_entity_type(Worker)
+        Worker.load_some(1, 10)  # migrates and saves both
+        db.clear_registry()
+
+        assert sorted(w.name for w in Team.load(team_id).members) == ["Ana", "Ben"]
 
     def test_migration_persistence_verification(self):
         """Test that migration changes are persisted to database."""
@@ -553,8 +643,13 @@ class TestMigrations:
         # Verify migration was persisted to database
         db = Database.get_instance()
         db_data = db.load("Product", product_id)
-        assert db_data["__version__"] == 2
-        assert db_data["price"] == 9.99
+        assert db_data == {
+            "_type": "Product",
+            "_id": product_id,
+            "name": "Widget",
+            "price": 9.99,
+            "__version__": 2,
+        }
 
         # Clear registry and load again - should not trigger migration
         db.clear_registry()
@@ -612,11 +707,8 @@ class TestMigrations:
 
         product = Product(name="Widget")
         product_id = product._id
-        # Access fields through __dict__ to get actual stored values
         db = Database.get_instance()
         stored_data = db.load("Product", product_id)
-        original_created = stored_data.get("timestamp_created")
-        original_creator = stored_data.get("creator")
 
         Database.get_instance().clear_registry()
 
@@ -629,7 +721,7 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 if from_version == 1 and to_version >= 2:
                     if "price" not in obj:
-                        obj["price"] = 0.0
+                        obj["price"] = 4.0
                 return obj
 
         Database.get_instance().register_entity_type(Product)
@@ -638,14 +730,17 @@ class TestMigrations:
 
         assert loaded is not None
         assert loaded.name == "Widget"
-        assert loaded.price == 0.0
-        # Verify mixin fields are preserved
+        assert loaded.price == 4.0
+        # The migration is not a write by the caller: every mixin field stays as stored
         loaded_data = db.load("Product", product_id)
-        assert loaded_data.get("timestamp_created") == original_created
-        assert loaded_data.get("creator") == original_creator
-        assert "timestamp_updated" in loaded_data
-        assert "updater" in loaded_data
-        assert "owner" in loaded_data
+        for field in (
+            "owner",
+            "creator",
+            "updater",
+            "timestamp_created",
+            "timestamp_updated",
+        ):
+            assert loaded_data[field] == stored_data[field], (field, loaded_data)
 
     def test_migration_error_handling(self):
         """Test that migration errors are handled gracefully."""
@@ -684,44 +779,54 @@ class TestMigrations:
             assert f"Product@{product_id}" in str(e)
 
     def test_migration_downgrade_scenario(self):
-        """Test behavior when loading newer version with older code."""
+        """A row written by newer code (the code was rolled back) is read as
+        stored and never overwritten: the older code would stamp it with its
+        own version, and the newer code would then migrate it a second time."""
 
-        class Product(Entity):
+        class Account(Entity):
             __version__ = 2
-            name = String()
-            price = Float(default=0.0)
-
-        product = Product(name="Widget", price=10.0)
-        product_id = product._id
-
-        # Verify v2 is stored
-        db = Database.get_instance()
-        stored_data = db.load("Product", product_id)
-        assert stored_data["__version__"] == 2
-
-        Database.get_instance().clear_registry()
-
-        # Simulate rollback to v1 code
-        class Product(Entity):
-            __version__ = 1
-            name = String()
+            balance = Integer()
 
             @classmethod
             def migrate(cls, obj, from_version, to_version):
-                # Downgrade scenario: from_version=2, to_version=1
-                # Default implementation does nothing
+                if from_version < 2:
+                    obj["balance"] = obj["balance"] * 100  # whole units to cents
                 return obj
 
-        Database.get_instance().register_entity_type(Product)
+        account_id = Account(balance=500)._id
+        db = Database.get_instance()
+        written = db.load("Account", account_id)
+        db.clear_registry()
 
-        # Loading v2 data with v1 code
-        # This will trigger migrate(data, from_version=2, to_version=1)
-        loaded = Product.load(product_id)
+        class Account(Entity):  # rolled back to the version 1 code
+            __version__ = 1
+            balance = Integer()
 
-        assert loaded is not None
-        assert loaded.name == "Widget"
-        # price field exists in data but not in v1 schema
-        # Entity should load without error (extra fields ignored)
+        db.register_entity_type(Account)
+        old = Account.load(account_id)
+        assert old.balance == 500
+        assert db.load("Account", account_id) == written
+        assert [a._id for a in Account.load_some(1, 10)] == [account_id]
+        try:
+            old.balance = 7
+            assert False, "older code overwrote a row of a newer version"
+        except errors.MigrationError as e:
+            assert f"Account@{account_id}" in str(e)
+        assert db.load("Account", account_id) == written
+        db.clear_registry()
+
+        class Account(Entity):  # rolled forward again
+            __version__ = 2
+            balance = Integer()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if from_version < 2:
+                    obj["balance"] = obj["balance"] * 100
+                return obj
+
+        db.register_entity_type(Account)
+        assert Account.load(account_id).balance == 500
 
     def test_migration_deserialize_simple(self):
         """Test migration during deserialize with simple properties."""
@@ -768,6 +873,69 @@ class TestMigrations:
         assert product_db_data["__version__"] == 2
         assert product_db_data["price"] == 19.99
 
+    def _realm_class_whose_v2_renamed_description(self):
+        class Realm(Entity):
+            __version__ = 2
+            name = String()
+            manifesto = String()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if from_version < 2:
+                    obj["manifesto"] = obj.pop("description", "")
+                return obj
+
+        Database.get_instance().register_entity_type(Realm)
+        return Realm
+
+    def test_an_export_of_current_data_imports_unchanged(self):
+        """serialize() writes the version, so deserialize() does not migrate
+        current data again (which emptied a renamed field)."""
+        Realm = self._realm_class_whose_v2_renamed_description()
+        exported = Realm(name="Valencia", manifesto="Our manifesto").serialize()
+        assert exported["__version__"] == 2
+
+        Database.get_instance().clear()
+        Realm = self._realm_class_whose_v2_renamed_description()
+        imported = Realm.deserialize(exported)
+
+        assert imported.manifesto == "Our manifesto"
+        stored = Database.get_instance().load("Realm", imported._id)
+        assert stored["manifesto"] == "Our manifesto"
+        assert stored["__version__"] == 2
+
+    def test_a_record_without_a_version_is_taken_to_be_current(self):
+        Realm = self._realm_class_whose_v2_renamed_description()
+        imported = Realm.deserialize(
+            {"_type": "Realm", "_id": "1", "name": "Valencia", "manifesto": "Ours"}
+        )
+        assert imported.manifesto == "Ours"
+
+    def test_deserialize_migrates_as_load_does(self):
+        """A record of an older version is migrated, a migrate() that raises
+        is a MigrationError naming the record, and a record of a newer
+        version is refused before anything is stored."""
+        Realm = self._realm_class_whose_v2_renamed_description()
+        old = {"_type": "Realm", "_id": "1", "name": "A", "description": "Ours"}
+        assert Realm.deserialize({**old, "__version__": 1}).manifesto == "Ours"
+
+        broken = {"_type": "Realm", "_id": "2", "name": "B", "__version__": 1}
+        Realm.migrate = classmethod(lambda cls, obj, f, t: obj["description"])
+        try:
+            Realm.deserialize(broken)
+            assert False, "a migrate() that raises was not reported"
+        except errors.MigrationError as e:
+            assert "Realm@2" in str(e)
+            assert isinstance(e.__cause__, KeyError)
+
+        newer = {"_type": "Realm", "_id": "3", "name": "C", "__version__": 3}
+        try:
+            Realm.deserialize(newer)
+            assert False, "a record of a newer version was imported"
+        except errors.MigrationError as e:
+            assert "Realm@3" in str(e)
+        assert Database.get_instance().load("Realm", "3") is None
+
     def test_migration_large_version_jump(self):
         """Test migration with large version jump (v1 to v10)."""
 
@@ -791,11 +959,11 @@ class TestMigrations:
             def migrate(cls, obj, from_version, to_version):
                 # Simulate multiple version migrations
                 if from_version < 5 and to_version >= 5:
-                    obj["price"] = 0.0
+                    obj["price"] = 1.0
                 if from_version < 7 and to_version >= 7:
-                    obj["category"] = "general"
+                    obj["category"] = "archive"
                 if from_version < 10 and to_version >= 10:
-                    obj["in_stock"] = True
+                    obj["in_stock"] = False
                 return obj
 
         Database.get_instance().register_entity_type(Product)
@@ -804,9 +972,151 @@ class TestMigrations:
 
         assert loaded is not None
         assert loaded.name == "Widget"
-        assert loaded.price == 0.0
-        assert loaded.category == "general"
-        assert loaded.in_stock is True
+        assert loaded.price == 1.0
+        assert loaded.category == "archive"
+        assert loaded.in_stock is False
+
+    def test_values_migrate_sets_are_checked_as_a_write_checks_them(self):
+        """A value migrate() got wrong is a MigrationError, not a stored row
+        that a later write of the same value refuses. Text for a number is
+        converted, as a write converts it. A field migrate() left alone is not
+        checked: it was checked when it was written."""
+
+        class Member(Entity):
+            __version__ = 1
+            handle = String()
+            age = Integer()
+
+        Member(handle="alice", age=30)
+        Member(handle="bobbybobby", age=40)
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Member(Entity):  # the same type, new code
+            __version__ = 2
+            handle = String(max_length=5)
+            age = Integer()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if obj["handle"] == "alice":
+                    obj["handle"] = "alice" * 5
+                else:
+                    obj["age"] = "41"
+                return obj
+
+        db.register_entity_type(Member)
+        before = db.load("Member", "1")
+        try:
+            Member.load("1")
+            assert False, "migrate() stored a value its field refuses"
+        except errors.MigrationError as e:
+            assert "Member@1" in str(e) and "handle" in str(e), str(e)
+            assert isinstance(e.__cause__, ValueError)
+        assert db.load("Member", "1") == before
+
+        bob = Member.load("2")
+        assert bob.age == 41
+        assert bob.handle == "bobbybobby"
+        assert db.load("Member", "2")["age"] == 41
+
+    def test_migrated_values_move_in_the_field_index(self):
+        """A value that migrate() changes leaves the old value's index entry
+        and is found under the new one."""
+
+        class Ticket(Entity):
+            __version__ = 1
+            status = String(indexed=True)
+
+        Ticket(status="open")
+        Ticket(status="closed")
+        Database.get_instance().clear_registry()
+
+        class Ticket(Entity):  # the same type, new code
+            __version__ = 2
+            status = String(indexed=True)
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                obj["status"] = obj["status"].upper()
+                return obj
+
+        Database.get_instance().register_entity_type(Ticket)
+        Ticket.load_some(1, 10)  # migrates and saves both
+
+        assert [t._id for t in Ticket.find_by("status", "OPEN")[0]] == ["1"]
+        assert [t._id for t in Ticket.find_by("status", "CLOSED")[0]] == ["2"]
+        assert Ticket.count_by("status", "open") == 0
+        assert Ticket.count_by("status", "closed") == 0
+
+    def test_migrated_alias_value_finds_the_row(self):
+        """A row whose alias value migrate() changes is found by the new value,
+        and no longer by the old one."""
+
+        class Tag(Entity):
+            __alias__ = "label"
+            __version__ = 1
+            label = String()
+
+        tag_id = Tag(label="urgent")._id
+        Database.get_instance().clear_registry()
+
+        class Tag(Entity):  # the same type, new code
+            __alias__ = "label"
+            __version__ = 2
+            label = String()
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                obj["label"] = obj["label"].upper()
+                return obj
+
+        Database.get_instance().register_entity_type(Tag)
+        Tag.load(tag_id)
+        Database.get_instance().clear_registry()
+
+        assert Tag["URGENT"]._id == tag_id
+        assert Tag["urgent"] is None
+
+    def test_after_the_alias_moves_rebuild_alias_index_finds_every_row(self):
+        """A row is filed under its alias value when it is saved. After
+        __alias__ moves to another field, the rows saved before are found by
+        it once rebuild_alias_index has run, and are no longer filed under the
+        old field."""
+
+        class Place(Entity):
+            __alias__ = "code"
+            code = String()
+            name = String()
+
+        Place(code="vlc", name="Valencia")
+        Place(code="bcn", name="Barcelona")
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Place(Entity):  # the same type, new code; nothing to migrate
+            __alias__ = "name"
+            code = String()
+            name = String()
+
+        db.register_entity_type(Place)
+        assert Place["Valencia"] is None
+
+        cursor = 1
+        while cursor is not None:
+            cursor = Place.rebuild_alias_index(
+                from_id=cursor, batch=1, old_alias="code"
+            )
+        db.clear_registry()
+
+        assert Place["Valencia"]._id == "1"
+        assert Place["Barcelona"]._id == "2"
+        assert db.load("Place_code_alias", "vlc") is None
+
+        class Unaliased(Entity):
+            name = String()
+
+        Tester.assert_raises(ValueError, Unaliased.rebuild_alias_index)
 
     def _cfg_rows_one_of_which_migrate_cannot_read(self):
         """Three rows stored at version 1, and the version 2 code, whose
@@ -898,6 +1208,37 @@ class TestMigrations:
         accounts, next_from_id = Account.page(1, 10)
         assert [a.name for a in accounts] == ["first", "fourth"]
         assert next_from_id is None
+
+    def test_a_row_that_cannot_be_built_is_not_left_in_the_identity_map(self):
+        """An entity is registered before its fields are set. In a canister
+        the identity map keeps what it holds until the message ends (weak
+        references do not free entities there), so one that failed half-way
+        must leave it: the next load of its id, or a page, returned the
+        half-built entity as if it were the row. A plain dict stands in for
+        the canister's map here."""
+
+        class Ledger(Entity):
+            name = String()
+            entries = OneToMany("LedgerEntry", "ledger")
+
+        class LedgerEntry(Entity):
+            ledger = ManyToOne("Ledger", "entries")
+
+        db = Database.get_instance()
+        db.save(
+            "Ledger",
+            "1",
+            {"_type": "Ledger", "_id": "1", "name": "x", "entries": ["7"]},
+        )
+        db.save("_system", "Ledger_id", "1")
+        registry = db._entity_registry
+        db._entity_registry = {}
+        try:
+            assert Ledger.load_some(1, 10) == []  # skipped: the OneToMany has no setter
+            assert db.get_entity("Ledger", "1") is None
+            assert Ledger.page(1, 10) == ([], None)
+        finally:
+            db._entity_registry = registry
 
 
 def run(test_name: str = None, test_var: str = None):

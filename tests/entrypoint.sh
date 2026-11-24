@@ -23,8 +23,23 @@ if [ ! -f "$TEMPLATE_PATH" ]; then
     echo "Template downloaded: $(du -sh "$TEMPLATE_PATH" | cut -f1)"
 fi
 
-# Define a list of test identifiers
-TEST_IDS=('example_1' 'example_2' 'entity' 'mixins' 'properties' 'alias_and_properties' 'relationships' 'enhanced_relations' 'serialization' 'database' 'audit' 'namespaces' 'indexed_fields' 'relation_view' 'paging' 'identity' 'sorted' 'index_keys' 'index_repair')
+# The same list as run_test.sh: every module there runs here too, in a canister.
+# A module listed here must also be imported by src/main.py.
+TEST_IDS=('example_1' 'example_2' 'entity' 'mixins' 'properties' 'alias_and_properties' 'relationships' 'enhanced_relations' 'serialization' 'namespaces' 'migrations' 'database' 'audit' 'auto_register' 'schema' 'indexed_fields' 'relation_view' 'paging' 'identity' 'sorted' 'index_keys' 'index_repair')
+
+# Upgrade the canister to the same wasm and fail unless the upgrade ran. dfx
+# skips installing a wasm whose hash is already installed (and still prints
+# "Upgraded code"), so without --upgrade-unchanged nothing was upgraded. The
+# boot time is set when main.py runs, which a real upgrade does again.
+upgrade_canister() {
+  BOOT_BEFORE=$(dfx canister call test boot_time)
+  dfx deploy --mode=upgrade --upgrade-unchanged
+  BOOT_AFTER=$(dfx canister call test boot_time)
+  if [ "$BOOT_BEFORE" == "$BOOT_AFTER" ]; then
+    echo "ERROR: the canister was not upgraded (boot time $BOOT_BEFORE before and after)"
+    exit 1
+  fi
+}
 
 if [ $# -gt 0 ]; then
   TEST_IDS=("$@")
@@ -55,7 +70,7 @@ for TEST_ID in "${TEST_IDS[@]}"; do
     BEFORE_UPGRADE=$(dfx canister call test dump_json)
 
     echo "Upgrading canister..."
-    dfx deploy --mode=upgrade
+    upgrade_canister
 
     echo "Getting database dump after upgrade..."
     AFTER_UPGRADE=$(dfx canister call test dump_json)
@@ -95,7 +110,7 @@ BEFORE_UPGRADE=$(dfx canister call test dump_json)
 
 echo "Testing upgrade persistence check..."
 echo "Upgrading canister..."
-dfx deploy --mode=upgrade
+upgrade_canister
 
 echo "Getting database dump after upgrade..."
 AFTER_UPGRADE=$(dfx canister call test dump_json)

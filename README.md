@@ -415,7 +415,7 @@ class Product(Entity):
 
 ### Upgrade compatibility enforcement
 
-Call `check_upgrade_compatibility()` from your canister's `post_upgrade` to reject incompatible upgrades before they corrupt data:
+`check_upgrade_compatibility()` rejects an incompatible upgrade before it corrupts data. A canister built with Basilisk runs it after `post_upgrade` automatically; calling it yourself does the same:
 
 ```python
 from basilisk import post_upgrade
@@ -436,6 +436,9 @@ The system classifies schema changes as:
 | Add field with `default=` | Safe | Auto-migrated |
 | Remove field | Safe | Old data ignored |
 | Add new Entity type | Safe | No migration needed |
+| Remove an Entity type with no rows | Safe | Nothing is left behind |
+| Remove or rename an Entity type that has rows | Breaking | Never waived: delete its rows first, or keep the class |
+| Move `__alias__` to another field | Breaking | Run `rebuild_alias_index(old_alias=...)` after the upgrade |
 | Change field type | Breaking | Requires `migrate()` |
 | Add field without default | Breaking | Requires `migrate()` |
 | Change relationship type | Breaking | Requires `migrate()` |

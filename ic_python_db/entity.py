@@ -136,6 +136,9 @@ class Entity:
     _deferred_types: List[Type["Entity"]] = []  # Types defined before DB exists
     _do_not_save = False
     _migrating = False  # True while a save persists a migration made on load
+    # The version of a row loaded from newer code than this (after a rollback);
+    # such an entity is never saved (see _hydrate)
+    _newer_version: Optional[int] = None
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
 
@@ -251,17 +254,26 @@ class Entity:
         # (indexes are already intact). Explicit updates later — including
         # deserialize() upserts — run the full descriptor path.
         self._hydrating = self._loaded
-        # Set additional attributes
-        for k, v in kwargs.items():
-            if not k.startswith("_"):
-                setattr(self, k, v)
-        if self._loaded and hasattr(self, "_restore_state"):
-            self._restore_state()
-        self._do_not_save = False
-        self._hydrating = False
+        try:
+            # Set additional attributes
+            for k, v in kwargs.items():
+                if not k.startswith("_"):
+                    setattr(self, k, v)
+            if self._loaded and hasattr(self, "_restore_state"):
+                self._restore_state()
+            self._do_not_save = False
+            self._hydrating = False
 
-        if not self._loaded:
-            self._save()
+            if not self._loaded:
+                self._save()
+        except Exception:
+            # It was registered above, before its fields. In a canister the
+            # identity map keeps it until the message ends, so the next load of
+            # this id would return the half-built entity.
+            db = self.db()
+            if db.get_entity(self._type, self._id) is self:
+                db.unregister_entity(self._type, self._id)
+            raise
 
     @classmethod
     def new(cls, **kwargs):
@@ -300,6 +312,15 @@ class Entity:
                     f"Only the owner can update this entity. Current owner: {self._owner}"
                 )
 
+    def _refuse_if_newer(self) -> None:
+        """Raise MigrationError if this row was stored by newer code."""
+        if self._newer_version is not None:
+            raise MigrationError(
+                f"{self._type}@{self._id} is stored at version "
+                f"{self._newer_version}, newer than this code's "
+                f"{self.__class__.__version__}: refusing to overwrite it"
+            )
+
     def _save(
         self,
     ) -> "Entity":
@@ -310,7 +331,9 @@ class Entity:
 
         Raises:
             PermissionError: If TimestampedMixin is used and caller is not the owner
+            MigrationError: If the row was stored by newer code (see _hydrate)
         """
+        self._refuse_if_newer()
 
         # Use full type name (including namespace) for system counters and storage
         type_name = self._type
@@ -351,8 +374,7 @@ class Entity:
         if not self._do_not_save:
             logger.debug(f"Saving entity {self._type}@{self._id} to database")
             db = self.db()
-            persisted_data = {**data, "__version__": self.__class__.__version__}
-            db.save(self._type, self._id, persisted_data)
+            db.save(self._type, self._id, data)
             if hasattr(self.__class__, "__alias__") and self.__class__.__alias__:
                 alias_field = self.__class__.__alias__
                 if hasattr(self, alias_field):
@@ -436,6 +458,57 @@ class Entity:
         return obj
 
     @classmethod
+    def _migrate_row(cls, label: str, data: dict, stored_version: int) -> dict:
+        """A copy of ``data`` migrated from ``stored_version`` to this class's
+        version: ``migrate()``, then the defaults of fields it did not set.
+
+        Shared by ``_hydrate`` (a stored row) and ``deserialize`` (a record);
+        ``label`` names the row in errors (``Type@id``). ``data`` is left as
+        it was, so the caller can compare the two.
+
+        Raises:
+            MigrationError: If ``migrate()`` raises.
+        """
+        current_version = cls.__version__
+        logger.debug(f"Migrating {label} from version {stored_version}")
+        try:
+            # Developer logic first; defaults only fill what it left out
+            migrated = cls.migrate(dict(data), stored_version, current_version)
+        except Exception as e:
+            raise MigrationError(
+                f"{label}: migrate() from version {stored_version} to "
+                f"{current_version} raised {type(e).__name__}: {e}"
+            ) from e
+        cls._check_migrated_values(label, data, migrated, stored_version)
+        migrated = cls._auto_migrate_defaults(migrated)
+        migrated["__version__"] = current_version
+        return migrated
+
+    @classmethod
+    def _check_migrated_values(
+        cls, label: str, data: dict, migrated: dict, stored_version: int
+    ) -> None:
+        """Check each property value ``migrate()`` set or changed the way a
+        write checks it, converting it as a write would. A row is built from
+        storage without checks (it was checked when written), so without this
+        a value ``migrate()`` got wrong was stored as it was.
+
+        Raises:
+            MigrationError: If a property refuses such a value.
+        """
+        for name in cls._property_names():
+            if name not in migrated or (name in data and migrated[name] == data[name]):
+                continue
+            try:
+                migrated[name] = getattr(cls, name)._checked(migrated[name])
+            except (TypeError, ValueError) as e:
+                raise MigrationError(
+                    f"{label}: migrate() from version {stored_version} to "
+                    f"{cls.__version__} set {name} to {migrated[name]!r}, which "
+                    f"the field refuses: {e}"
+                ) from e
+
+    @classmethod
     def load(
         cls: Type[T], entity_id: str = None, level: int = LEVEL_MAX_DEFAULT
     ) -> Optional[T]:
@@ -485,27 +558,17 @@ class Entity:
         stored_version = data.get("__version__", 1)
         current_version = cls.__version__
 
+        if stored_version > current_version:
+            # Written by newer code: this code was rolled back. Read the row as
+            # stored and never write it, since a save would stamp it with this
+            # older version and the newer code would then migrate it again.
+            entity = cls(**data, _loaded=True)
+            entity._newer_version = stored_version
+            return entity
+
         if stored_version != current_version:
-            logger.debug(
-                f"Version mismatch for {type_name}@{entity_id}: "
-                f"stored={stored_version}, current={current_version}"
-            )
-            stored = dict(data)  # migrate() may change data in place
-            # Apply custom migration first (developer logic takes priority)
-            try:
-                data = cls.migrate(data, stored_version, current_version)
-            except Exception as e:
-                raise MigrationError(
-                    f"{type_name}@{entity_id}: migrate() from version "
-                    f"{stored_version} to {current_version} raised "
-                    f"{type(e).__name__}: {e}"
-                ) from e
-            # Auto-inject defaults for new fields not handled by migrate()
-            data = cls._auto_migrate_defaults(data)
-            data["__version__"] = current_version
-            logger.debug(
-                f"Migrated {type_name}@{entity_id} to version {current_version}"
-            )
+            stored = data
+            data = cls._migrate_row(f"{type_name}@{entity_id}", data, stored_version)
 
         # Create instance first
         entity = cls(**data, _loaded=True)
@@ -533,7 +596,43 @@ class Entity:
                     db.field_index_remove(self._type, field, str(old), self._id)
                 if new is not None:
                     db.field_index_add(self._type, field, str(new), self._id)
+        for name in self._foreign_key_names():
+            old, new = stored.get(name), self.__dict__.get(f"_rel_{name}")
+            old = None if old is None else str(old)
+            if old != new:
+                self._move_reverse_entry(name, old, new)
+        alias = getattr(type(self), "__alias__", None)
+        if alias:
+            old = stored.get(alias)
+            if old is not None and old != getattr(self, alias, None):
+                self._drop_alias_entry(alias, old)  # the save filed the new value
         self._sync_sorted()
+
+    def _drop_alias_entry(self, field: str, value: Any) -> None:
+        """Remove the alias entry of ``value`` under ``field``, if it names this row."""
+        db = self.db()
+        key = self._alias_key(field)
+        if db.load(key, str(value)) == self._id:
+            db.delete(key, str(value))
+
+    def _move_reverse_entry(
+        self, name: str, old: Optional[str], new: Optional[str]
+    ) -> None:
+        """Move this row's entry in the reverse index of the row that its
+        reference ``name`` names, from ``old`` to ``new``.
+
+        A reference migrate() set (renamed, added or pointed elsewhere) is
+        stored by the save, but the other side of the relation reads the
+        reverse index, which only a write through the relation updates."""
+        relation = getattr(type(self), name)
+        db = self.db()
+        for ref, move in ((old, db.reverse_index_remove), (new, db.reverse_index_add)):
+            if ref is None:
+                continue
+            for type_name in relation._get_allowed_types():
+                if db._entity_types.get(type_name) and db.load(type_name, ref):
+                    move(type_name, ref, relation.reverse_name, self._id)
+                    break
 
     @classmethod
     def _require_unpaged(cls, method: str) -> None:
@@ -765,6 +864,70 @@ class Entity:
     def _rebuild_field_indexes(
         cls: Type[T], fields: List[str], from_id: int, batch: int
     ) -> Optional[int]:
+        db = cls.db()
+        type_name = cls.get_full_type_name()
+
+        def index(entity):
+            for field in fields:
+                value = getattr(entity, field, None)
+                if value is not None:
+                    db.field_index_add(type_name, field, str(value), entity._id)
+
+        return cls._for_each_in_batch(from_id, batch, index)
+
+    @classmethod
+    def rebuild_alias_index(
+        cls: Type[T],
+        from_id: int = 1,
+        batch: int = 200,
+        old_alias: Optional[str] = None,
+    ) -> Optional[int]:
+        """File one batch of entities under their alias value; resumable.
+
+        A row is filed under its alias value when it is saved. After
+        ``__alias__`` moves to another field (or is first set), the rows saved
+        before are not found by the new field's values until this has run over
+        them. Spread it over update calls as ``rebuild_field_index`` is (a
+        query's writes are discarded):
+
+            cursor = 1
+            while cursor is not None:
+                cursor = Realm.rebuild_alias_index(from_id=cursor, old_alias="id")
+
+        With ``old_alias``, each row's entry under that field is removed.
+        Idempotent.
+
+        Returns:
+            The from_id for the next batch, or None when the rebuild is done.
+
+        Raises:
+            ValueError: If the class has no ``__alias__``.
+        """
+        alias = getattr(cls, "__alias__", None)
+        if not alias:
+            raise ValueError(f"{cls.__name__} has no __alias__")
+        db = cls.db()
+
+        def file_under_alias(entity):
+            value = getattr(entity, alias, None)
+            if value is not None:
+                db.save(cls._alias_key(), value, entity._id)
+            if old_alias and old_alias != alias:
+                old_value = getattr(entity, old_alias, None)
+                if old_value is not None:
+                    entity._drop_alias_entry(old_alias, old_value)
+
+        return cls._for_each_in_batch(from_id, batch, file_under_alias)
+
+    @classmethod
+    def _for_each_in_batch(
+        cls: Type[T], from_id: int, batch: int, action: Callable[[T], None]
+    ) -> Optional[int]:
+        """Call ``action`` on each live entity of one batch from ``from_id``.
+
+        Returns:
+            The from_id for the next batch, or None after the last.
+        """
         if from_id < 1:
             raise ValueError("from_id must be at least 1")
         if batch < 1:
@@ -774,15 +937,10 @@ class Entity:
         if max_id == 0 or from_id > max_id:
             return None
 
-        db = cls.db()
-        type_name = cls.get_full_type_name()
         # One range read per batch of *live* entities (deleted ids cost nothing)
         entities = cls.load_some(from_id, batch)
         for entity in entities:
-            for field in fields:
-                value = getattr(entity, field, None)
-                if value is not None:
-                    db.field_index_add(type_name, field, str(value), entity._id)
+            action(entity)
 
         if len(entities) < batch:
             return None
@@ -1277,11 +1435,13 @@ class Entity:
         # Get mixin data first if available
         data = super().serialize() if hasattr(super(), "serialize") else {}
 
-        # Add core entity data
+        # Add core entity data. A row loaded from newer code keeps the version
+        # it was stored at: an export of it is of that version, not of this code's.
         data.update(
             {
                 "_type": self._type,
                 "_id": self._id,
+                "__version__": self._newer_version or self.__class__.__version__,
             }
         )
 
@@ -1403,8 +1563,14 @@ class Entity:
         Returns:
             Entity instance (either updated existing or newly created)
 
+        A record carries the version it was written at (``__version__``, as
+        ``serialize()`` writes it) and is migrated from it; one without is
+        taken to be of the current version.
+
         Raises:
             ValueError: If data is invalid or entity type not found
+            MigrationError: If the record is of a newer version than the class,
+                or its ``migrate()`` raises
         """
         if not isinstance(data, dict):
             raise ValueError("Data must be a dictionary")
@@ -1435,17 +1601,19 @@ class Entity:
                 f"Entity type mismatch: expected {full_type_name} or {cls.__name__}, got {entity_type}"
             )
 
-        stored_version = data.get("__version__", 1)
-        current_version = cls.__version__
-
-        if stored_version != current_version:
-            logger.debug(
-                f"Version mismatch during deserialize for {entity_type}: "
-                f"stored={stored_version}, current={current_version}"
+        # serialize() writes the version. A record without one was written by
+        # hand, or by serialize() before it did: take it to be of this code's
+        # version, since migrating it from version 1 re-applies every step to
+        # data that may already be current.
+        stored_version = data.get("__version__", cls.__version__)
+        label = f"{entity_type}@{data.get('_id')}"
+        if stored_version > cls.__version__:
+            raise MigrationError(
+                f"{label}: the record is of version {stored_version}, newer "
+                f"than this code's {cls.__version__}"
             )
-            data = cls.migrate(data, stored_version, current_version)
-            data["__version__"] = current_version
-            logger.debug(f"Migrated {entity_type} to version {current_version}")
+        if stored_version != cls.__version__:
+            data = cls._migrate_row(label, data, stored_version)
 
         # Try to find existing entity
         existing_entity = None
@@ -1474,6 +1642,7 @@ class Entity:
             # Refuse now: the fields merged below run hooks and move index
             # entries, and the save that would refuse comes after all of them
             existing_entity._check_owner()
+            existing_entity._refuse_if_newer()
 
             # Store old alias value for cleanup if it changes
             old_alias_value = None

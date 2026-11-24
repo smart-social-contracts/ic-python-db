@@ -71,6 +71,31 @@ class Property(Generic[T]):
             return self  # type: ignore[return-value]
         return obj.__dict__.get(f"_{PROPERTY_STORAGE_PREFIX}_{self.name}", self.default)
 
+    def _checked(self, value):
+        """``value`` as this property stores it, or an error: a string is
+        converted for an int, float or bool property, as on any write.
+
+        Raises:
+            TypeError: If it is not of the property's type.
+            ValueError: If the property's validator refuses it.
+        """
+        if value is None:
+            return value
+        if not isinstance(value, self.type):
+            if isinstance(value, str) and self.type in (int, float, bool):
+                try:
+                    if self.type == bool:
+                        value = value.lower() in ("true", "1", "yes", "on")
+                    else:
+                        value = self.type(value)
+                except (ValueError, TypeError):
+                    raise TypeError(f"{self.name} must be of type {self.type.__name__}")
+            else:
+                raise TypeError(f"{self.name} must be of type {self.type.__name__}")
+        if self.validator and not self.validator(value):
+            raise ValueError(f"Invalid value for {self.name}: {value}")
+        return value
+
     def __set__(self, obj, value):
         # Fast path: hydrating from DB — store raw value, indexes are intact.
         if getattr(obj, "_hydrating", False):
@@ -93,25 +118,7 @@ class Property(Generic[T]):
         if not allow:
             raise ValueError(f"Hook rejected change to {self.name}")
 
-        value = modified_value
-
-        if value is not None:
-            if not isinstance(value, self.type):
-                if isinstance(value, str) and self.type in (int, float, bool):
-                    try:
-                        if self.type == bool:
-                            value = value.lower() in ("true", "1", "yes", "on")
-                        else:
-                            value = self.type(value)
-                    except (ValueError, TypeError):
-                        raise TypeError(
-                            f"{self.name} must be of type {self.type.__name__}"
-                        )
-                else:
-                    raise TypeError(f"{self.name} must be of type {self.type.__name__}")
-
-            if self.validator and not self.validator(value):
-                raise ValueError(f"Invalid value for {self.name}: {value}")
+        value = self._checked(modified_value)
 
         obj.__dict__[f"_{PROPERTY_STORAGE_PREFIX}_{self.name}"] = value
 

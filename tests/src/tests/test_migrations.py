@@ -812,6 +812,7 @@ class TestMigrations:
             assert False, "older code overwrote a row of a newer version"
         except errors.MigrationError as e:
             assert f"Account@{account_id}" in str(e)
+        assert old.balance == 500  # refused before anything changed
         assert db.load("Account", account_id) == written
         db.clear_registry()
 

@@ -2,11 +2,30 @@
 
 from typing import Any, Dict, Optional
 
+from .context import require_id
 from .system_time import SystemTime
 
 
 class TimestampedMixin:
-    """Mixin that adds creation and update timestamps to entities."""
+    """Mixin that adds creation and update timestamps to entities.
+
+    Who may write: the owner, or any caller while the entity has no owner yet
+    (it is being created, or was stored before its class had the mixin). The
+    first save claims it: the caller becomes its creator and owner. After that
+    only ``set_owner``, called by the owner, gives it to someone else.
+    """
+
+    # The state, under the names serialize() writes it with. The claim and each
+    # save set it; Entity.deserialize does not take it from the data.
+    _STATE_FIELDS = (
+        "owner",
+        "creator",
+        "updater",
+        "timestamp_created",
+        "timestamp_updated",
+    )
+    # Set only while set_owner saves: who the save hands the entity to
+    _new_owner: Optional[str] = None
 
     def __init__(self):
         self._timestamp_created = 0
@@ -28,6 +47,12 @@ class TimestampedMixin:
             self._owner = caller_id
             # A row saved by a migration, before it was claimed, stores "None"
             self.__dict__.pop("timestamp_created", None)
+        if self._owner is None:
+            # Claimed but left without an owner: set_owner(None) allowed it
+            # before 0.17, and any caller could write such a row
+            self._owner = caller_id
+        if self._new_owner is not None:
+            self._owner = self._new_owner
 
         self._timestamp_updated = now
         self._updater = caller_id
@@ -60,12 +85,26 @@ class TimestampedMixin:
         self._updater = self.__dict__.pop("updater", None)
 
     def set_owner(self, new_owner: str) -> None:
-        """Set a new owner for this entity.
+        """Give this entity to new_owner, and store it.
+
+        The transfer is a write by the caller: it is refused like any other
+        write by a caller who does not own the entity, and it records the
+        caller as the updater.
 
         Args:
             new_owner: ID of the new owner
+
+        Raises:
+            ValueError: If new_owner is not a non-empty string
+            PermissionError: If the caller does not own this entity
         """
-        self._owner = new_owner
+        require_id(new_owner, "new_owner")
+        self._new_owner = new_owner
+        try:
+            # Checks the caller against the owner before the change
+            self._save()
+        finally:
+            self._new_owner = None
 
     def check_ownership(self, caller_id: str) -> bool:
         """Check if the caller owns this entity.

@@ -111,10 +111,13 @@ def test_as_user_with_access_control():
         doc.title = "Updated"
         assert doc.title == "Updated"
 
-    # Bob cannot modify Alice's doc
+    # Bob cannot modify Alice's doc: the owner check refuses him before the
+    # hook runs, and nothing changes
     with db.as_user("bob"):
-        with pytest.raises(ValueError, match="Hook rejected"):
+        with pytest.raises(PermissionError, match="Only the owner"):
             doc.title = "Hacked"
+    assert doc.title == "Updated"
+    assert db.load("Document", doc._id)["title"] == "Updated"
 
 
 def test_as_user_exception_handling():

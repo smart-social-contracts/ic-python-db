@@ -179,26 +179,7 @@ assert user.slug == "john-doe"
 
 ## Combining with Access Control
 
-Hooks work naturally with the `as_user()` context manager for ownership-based access control. See [ACCESS_CONTROL.md](ACCESS_CONTROL.md) for details.
-
-```python
-from ic_python_db import ACTION_MODIFY, ACTION_DELETE, Entity, String
-from ic_python_db.context import get_caller_id
-from ic_python_db.mixins import TimestampedMixin
-
-class Document(Entity, TimestampedMixin):
-    title = String()
-
-    @staticmethod
-    def on_event(entity, field_name, old_value, new_value, action):
-        caller = get_caller_id()
-
-        if action in (ACTION_MODIFY, ACTION_DELETE):
-            if entity._owner != caller:
-                return False, None  # Only owner can modify/delete
-
-        return True, new_value
-```
+With `TimestampedMixin`, a write or delete by a caller other than the owner raises `PermissionError` before the hook is called, so a hook sees only the owner's changes and adds rules on top of the ownership check (a field only some callers may change, an audit trail). See [ACCESS_CONTROL.md](ACCESS_CONTROL.md) for details.
 
 ## Notes
 

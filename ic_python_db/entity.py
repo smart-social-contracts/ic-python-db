@@ -304,13 +304,26 @@ class Entity:
         """Raise PermissionError if the caller does not own this entity.
 
         Only a TimestampedMixin entity has an owner. One with none yet is being
-        created, and the save that follows claims it.
+        created, or was stored before its class had the mixin, and the save
+        that follows claims it. Neither a caller id nor set_owner can be None,
+        so a claimed entity never goes back to having none.
         """
         if hasattr(self, "check_ownership") and self._owner is not None:
             if not self.check_ownership(get_caller_id()):
                 raise PermissionError(
                     f"Only the owner can update this entity. Current owner: {self._owner}"
                 )
+
+    def _check_write(self) -> None:
+        """Raise before a write to this entity changes anything.
+
+        The save that ends a write refuses it too, but a field's index entries,
+        its sorted entry and a relation's reverse index are written before that
+        save, and its hook has run: refused only there, a write the caller may
+        not make had already moved them.
+        """
+        self._refuse_if_newer()
+        self._check_owner()
 
     def _refuse_if_newer(self) -> None:
         """Raise MigrationError if this row was stored by newer code."""
@@ -1304,6 +1317,11 @@ class Entity:
             _require_unpaged,
         )
 
+        # Deleting is a write: refused to a caller who does not own the entity,
+        # and to older code for a row newer code stored, whose index entries
+        # this code may not know of
+        self._check_write()
+
         # Call hook before deletion
         allow, _ = call_entity_hook(self, None, self, None, ACTION_DELETE)
 
@@ -1544,6 +1562,25 @@ class Entity:
         return data
 
     @classmethod
+    def _without_mixin_state(cls, data: dict) -> dict:
+        """data without the TimestampedMixin state it carries.
+
+        The owner, creator, updater and timestamps say who wrote the row: the
+        claim and each save set them. Taken from imported data, they would be
+        stored as the data gives them, and as plain attributes they would
+        shadow the mixin's own state. A field the class declares under one of
+        these names is a Property, and is kept.
+        """
+        from .properties import Property
+
+        state = getattr(cls, "_STATE_FIELDS", ())
+        return {
+            key: value
+            for key, value in data.items()
+            if key not in state or isinstance(getattr(cls, key, None), Property)
+        }
+
+    @classmethod
     def deserialize(cls, data: dict, level: int = 1):
         """Deserialize entity from dictionary data with upsert functionality.
 
@@ -1566,6 +1603,10 @@ class Entity:
         A record carries the version it was written at (``__version__``, as
         ``serialize()`` writes it) and is migrated from it; one without is
         taken to be of the current version.
+
+        On a class with TimestampedMixin, the record's ``owner``, ``creator``,
+        ``updater`` and timestamps are ignored: the caller claims a new row
+        and is recorded as the updater of an existing one, as on any write.
 
         Raises:
             ValueError: If data is invalid or entity type not found
@@ -1614,6 +1655,7 @@ class Entity:
             )
         if stored_version != cls.__version__:
             data = cls._migrate_row(label, data, stored_version)
+        data = cls._without_mixin_state(data)
 
         # Try to find existing entity
         existing_entity = None

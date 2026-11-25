@@ -780,6 +780,59 @@ class TestEntity:
             "saving is on": True,
         }, observed
 
+    def test_a_constructor_that_raises_leaves_nothing_behind(self):
+        """An argument refused after others have been set leaves no id, count,
+        field-index, sorted or relation entry, and the id is given back
+        (issue #43)."""
+
+        class CxTeam(Entity):
+            name = String()
+            members = OneToMany("CxItem", "team")
+
+        class CxItem(Entity):
+            owner = String(indexed=True)
+            score = Integer(sorted=True)
+            qty = Integer()
+            team = ManyToOne("CxTeam", "members")
+
+        team = CxTeam(name="t")
+        attempts = (
+            (TypeError, {"team": team, "owner": "alice", "score": 3, "qty": "x"}),
+            (ValueError, {"owner": "alice", "score": 3, "team": "404"}),
+        )
+        for error, kwargs in attempts:
+            Tester.assert_raises(error, CxItem, **kwargs)
+            assert CxItem.count() == 0, kwargs
+            assert CxItem.max_id() == 0, kwargs
+            assert CxItem.count_by("owner", "alice") == 0, kwargs
+            assert CxItem.top_by("score")[0] == [], kwargs
+            assert len(team.members) == 0, kwargs
+            assert Database.get_instance().get_entity("CxItem", "1") is None
+
+        item = CxItem(owner="bob", qty=1, team=team)
+        assert item._id == "1"  # the ids the failures took were given back
+        assert CxItem.count_by("owner", "bob") == 1
+        assert [m._id for m in team.members] == ["1"]
+
+    def test_a_failed_constructor_gives_back_only_an_id_nobody_took_since(self):
+        """If another entity took a later id while the constructor ran (its
+        hook made one), the counter is left alone: the id stays unused."""
+
+        class CxNested(Entity):
+            name = String()
+            qty = Integer()
+
+            @staticmethod
+            def on_event(entity, field_name, old_value, new_value, action):
+                if field_name == "name" and new_value == "outer":
+                    CxNested(name="inner", qty=1)
+                return True, new_value
+
+        Tester.assert_raises(TypeError, CxNested, name="outer", qty="x")
+        assert CxNested.max_id() == 2
+        assert CxNested.count() == 1
+        assert CxNested.load("2").name == "inner"
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestEntity)

@@ -7,7 +7,7 @@ import weakref
 from tester import Tester
 
 import ic_python_db.db_engine as engine
-from ic_python_db import Database, Entity, String
+from ic_python_db import Database, Entity, StaleEntityError, String
 
 
 class IdNote(Entity):
@@ -73,6 +73,80 @@ class TestIdentity:
             assert len(Database.get_instance()._entity_registry) == 1
         finally:
             engine._message_time = original
+
+    # An instance held across a message boundary (issue #47).
+    # clear_registry() is what a new message does to the identity map.
+
+    def test_a_held_instance_cannot_write_back_over_another_messages_change(self):
+        class IdOrder(Entity):
+            status = String(default="open")
+            paid = String(default="no")
+
+        db = Database.get_instance()
+        IdOrder()
+        held = IdOrder.load("1")  # message 1 loads it, then awaits a call
+        db.clear_registry()
+        IdOrder.load("1").paid = "yes"  # message 2 records a payment
+        db.clear_registry()  # message 1 resumes with the instance it held
+        Tester.assert_raises(StaleEntityError, setattr, held, "status", "shipped")
+        assert held.status == "open"
+        stored = db.load("IdOrder", "1")
+        assert (stored["status"], stored["paid"]) == ("open", "yes")
+
+        fresh = IdOrder.load("1")  # what the error says to do
+        fresh.status = "shipped"
+        stored = db.load("IdOrder", "1")
+        assert (stored["status"], stored["paid"]) == ("shipped", "yes")
+
+    def test_a_held_instance_of_an_unchanged_row_writes_normally(self):
+        """Nothing changed the row: the write goes through, and the instance
+        is the one a load returns again."""
+
+        class IdCart(Entity):
+            items = String(default="")
+
+        db = Database.get_instance()
+        held = IdCart(items="a")
+        db.clear_registry()
+        held.items = "a,b"
+        assert db.load("IdCart", held._id)["items"] == "a,b"
+        assert IdCart.load(held._id) is held
+        held.items = "a,b,c"
+        assert db.load("IdCart", held._id)["items"] == "a,b,c"
+
+    def test_a_held_instance_cannot_bring_back_a_deleted_row(self):
+        class IdTicket(Entity):
+            note = String(default="")
+
+        db = Database.get_instance()
+        held = IdTicket(note="a")
+        db.clear_registry()
+        IdTicket.load(held._id).delete()
+        db.clear_registry()
+        Tester.assert_raises(StaleEntityError, setattr, held, "note", "b")
+        Tester.assert_raises(StaleEntityError, held._save)
+        Tester.assert_raises(StaleEntityError, held.delete)
+        assert db.load("IdTicket", held._id) is None
+        assert IdTicket.count() == 0
+
+    def test_after_a_held_instance_writes_a_fresh_one_of_the_same_row_is_stale(
+        self,
+    ):
+        """The held instance passed its check and wrote: an instance loaded in
+        this message before that holds the old row, and must not write it."""
+
+        class IdBox(Entity):
+            a = String(default="")
+            b = String(default="")
+
+        db = Database.get_instance()
+        held = IdBox()
+        db.clear_registry()
+        fresh = IdBox.load(held._id)
+        held.a = "by held"
+        Tester.assert_raises(StaleEntityError, setattr, fresh, "b", "by fresh")
+        stored = db.load("IdBox", held._id)
+        assert (stored["a"], stored["b"]) == ("by held", "")
 
 
 def run(test_name: str = None, test_var: str = None):

@@ -1021,6 +1021,103 @@ class TestMigrations:
         assert bob.handle == "bobbybobby"
         assert db.load("Member", "2")["age"] == 41
 
+    def test_a_value_migrate_sets_on_a_converting_field_loads(self):
+        """realms-gos's Json (a String that dumps in __set__ and loads in
+        __get__) keeps a list as JSON text, and its rows hold the list. A
+        migrate() that sets a list there was refused as "must be of type str",
+        so every row of the previous version was unreadable (issue #61). It
+        loads, and is stored once encoded, not twice."""
+
+        class JsonText(String):
+            def __get__(self, obj, t=None):
+                if obj is None:
+                    return self
+                return json.loads(super().__get__(obj, t) or "null")
+
+            def __set__(self, obj, value):
+                super().__set__(obj, json.dumps(value))
+
+        class Rule(Entity):
+            __version__ = 2
+            name = String()
+            rules = JsonText(default="[]")
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                if isinstance(obj.get("rules"), dict):
+                    obj["rules"] = [
+                        {"fund": k, "share": v} for k, v in obj["rules"].items()
+                    ]
+                return obj
+
+        db = Database.get_instance()
+        db.save(
+            "Rule",
+            "1",
+            {
+                "_type": "Rule",
+                "_id": "1",
+                "__version__": 1,
+                "name": "r",
+                "rules": {"ROADS": 30},
+            },
+        )
+        db.save("_system", "Rule_id", "1")
+        expected = [{"fund": "ROADS", "share": 30}]
+
+        assert Rule.load("1").rules == expected
+        stored = db.load("Rule", "1")
+        assert stored["__version__"] == 2
+        assert stored["rules"] == expected, stored  # not JSON text of JSON text
+
+        db.clear_registry()  # a later message reads what the migration stored
+        rule = Rule.load("1")
+        assert rule.rules == expected
+        rule.name = "renamed"
+        assert db.load("Rule", "1")["rules"] == expected
+
+    def test_a_converting_field_can_check_a_migrated_value_its_own_way(self):
+        """Such a field is not checked with the base type's check; it can
+        override _migrated: a value it accepts loads, and one it refuses is a
+        MigrationError."""
+
+        class ShortJson(String):
+            def __get__(self, obj, t=None):
+                if obj is None:
+                    return self
+                return json.loads(super().__get__(obj, t) or "null")
+
+            def __set__(self, obj, value):
+                super().__set__(obj, json.dumps(value))
+
+            def _migrated(self, value):
+                self._checked(json.dumps(value))  # what __set__ would store
+                return value
+
+        class Note(Entity):
+            __version__ = 2
+            tags = ShortJson(max_length=10)
+
+            @classmethod
+            def migrate(cls, obj, from_version, to_version):
+                obj["tags"] = ["a much too long tag"] if obj["_id"] == "1" else ["ok"]
+                return obj
+
+        db = Database.get_instance()
+        for note_id in ("1", "2"):
+            db.save(
+                "Note",
+                note_id,
+                {"_type": "Note", "_id": note_id, "__version__": 1, "tags": []},
+            )
+        db.save("_system", "Note_id", "2")
+        try:
+            Note.load("1")
+            assert False, "a value the field refuses was stored"
+        except errors.MigrationError as e:
+            assert "Note@1" in str(e) and "tags" in str(e), str(e)
+        assert Note.load("2").tags == ["ok"]
+
     def test_migrated_values_move_in_the_field_index(self):
         """A value that migrate() changes leaves the old value's index entry
         and is found under the new one."""

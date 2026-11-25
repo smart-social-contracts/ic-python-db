@@ -102,6 +102,26 @@ class Property(Generic[T]):
             raise ValueError(f"Invalid value for {self.name}: {value}")
         return value
 
+    def _migrated(self, value):
+        """``value``, which a ``migrate()`` set, as the row is to store it:
+        checked and converted the way a write checks it.
+
+        A subclass that converts in ``__set__`` or ``__get__`` (realms-gos's
+        ``Json`` keeps a list as JSON text) is given, and the row holds, the
+        value before its conversion. ``_checked`` would refuse that value, and
+        storing what ``_checked`` returns would have the conversion done twice
+        when the row is built. Such a value is left as ``migrate()`` gave it; a
+        subclass can override this to check it its own way. An override must
+        return the value in the form ``migrate()`` gave it, never what
+        ``__set__`` would store: the row is built through ``__set__``, so that
+        form would be converted twice.
+        """
+        converts = (
+            type(self).__set__ is not Property.__set__
+            or type(self).__get__ is not Property.__get__
+        )
+        return value if converts else self._checked(value)
+
     def __set__(self, obj, value):
         # Fast path: hydrating from DB — store raw value, indexes are intact.
         if getattr(obj, "_hydrating", False):

@@ -496,6 +496,19 @@ class OneToOne(Relation[E]):
         db = Database.get_instance()
         old_ref = obj.__dict__.get(f"_rel_{self.name}")
 
+        # OneToOne exclusivity: a link value or obj already has to another
+        # entity is cleared, and the entity holding it is saved. Those are
+        # writes to other entities: check them all before anything changes.
+        target_unlinked = value is not None and value.__dict__.get(
+            f"_rel_{self.reverse_name}"
+        ) not in (None, obj._id)
+        inverse_links = [] if value is None else self._linked_to(obj, db, value._id)
+        if target_unlinked:
+            value._check_write()
+        for _, holder in inverse_links:
+            if holder is not None:
+                holder._check_write()
+
         # Remove from old target's reverse index
         if old_ref is not None and obj._id is not None:
             for type_name in self._get_allowed_types():
@@ -506,42 +519,21 @@ class OneToOne(Relation[E]):
                     )
                     break
 
-        # Enforce OneToOne exclusivity: if the target entity already has a direct
-        # FK on the reverse relation pointing to a different entity, clear it.
-        if value is not None:
-            existing_on_target = value.__dict__.get(f"_rel_{self.reverse_name}")
-            if existing_on_target is not None and existing_on_target != obj._id:
-                # The target already links to someone else via reverse relation.
-                # Clear that link and its reverse index entry.
-                db.reverse_index_remove(
-                    obj._type, existing_on_target, self.name, value._id
-                )
-                value.__dict__[f"_rel_{self.reverse_name}"] = None
-                value._save()
+        if target_unlinked:
+            # The target already links to someone else via the reverse
+            # relation: clear that link and its reverse index entry
+            existing_on_target = value.__dict__[f"_rel_{self.reverse_name}"]
+            db.reverse_index_remove(obj._type, existing_on_target, self.name, value._id)
+            value.__dict__[f"_rel_{self.reverse_name}"] = None
+            value._save()
 
-            # Also check if obj was previously linked via reverse index (inverse side)
-            # e.g., if someone else set "other.rel = obj" previously
-            existing_in_ri = db.reverse_index_get(obj._type, obj._id, self.name)
-            for old_other_id in existing_in_ri:
-                if old_other_id != value._id:
-                    db.reverse_index_remove(obj._type, obj._id, self.name, old_other_id)
-                    # Clear the other entity's direct FK
-                    for tn in self._get_allowed_types():
-                        ec = db._entity_types.get(tn)
-                        if ec:
-                            other_entity = ec.load(old_other_id)
-                            if (
-                                other_entity
-                                and other_entity.__dict__.get(
-                                    f"_rel_{self.reverse_name}"
-                                )
-                                == obj._id
-                            ):
-                                other_entity.__dict__[f"_rel_{self.reverse_name}"] = (
-                                    None
-                                )
-                                other_entity._save()
-                                break
+        # obj was linked from another entity (someone set "other.rel = obj"):
+        # clear that entity's reference to obj
+        for other_id, holder in inverse_links:
+            db.reverse_index_remove(obj._type, obj._id, self.name, other_id)
+            if holder is not None:
+                holder.__dict__[f"_rel_{self.reverse_name}"] = None
+                holder._save()
 
         # Set new reference
         if value is not None:
@@ -557,6 +549,27 @@ class OneToOne(Relation[E]):
 
         if not obj._do_not_save:
             obj._save()
+
+    def _linked_to(self, obj, db, keep_id):
+        """(id, holder) for each entity the reverse index lists as linked to
+        obj through this relation, except keep_id. The holder is that entity
+        if its own reference names obj, else None."""
+        links = []
+        for other_id in db.reverse_index_get(obj._type, obj._id, self.name):
+            if other_id == keep_id:
+                continue
+            holder = None
+            for type_name in self._get_allowed_types():
+                entity_class = db._entity_types.get(type_name)
+                other = entity_class.load(other_id) if entity_class else None
+                if (
+                    other is not None
+                    and other.__dict__.get(f"_rel_{self.reverse_name}") == obj._id
+                ):
+                    holder = other
+                    break
+            links.append((other_id, holder))
+        return links
 
 
 def _require_unpaged(db, obj, relation_name, action, instead):

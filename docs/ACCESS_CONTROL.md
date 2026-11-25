@@ -116,17 +116,7 @@ with db.as_user("alice"):
 
 ### Admin Override
 
-With `TimestampedMixin` the owner check runs before the hook, so a hook cannot let a caller other than the owner write. An administrator acts on another caller's entity as its owner, or has it handed over by the owner with `set_owner`:
-
-```python
-ADMINS = ["admin", "superuser"]
-
-def admin_update(entity, field, value):
-    if get_caller_id() not in ADMINS:
-        raise PermissionError("admins only")
-    with db.as_user(entity._owner):
-        setattr(entity, field, value)
-```
+There is none with `TimestampedMixin`: the owner check runs before the hook, so a hook cannot let anyone but the owner write, and acting as the owner (`as_user(entity._owner)`) would record the owner as the updater of a change they did not make. An administrator who must change another caller's entity has its owner hand it over with `set_owner` first.
 
 ### Field-Level Access
 

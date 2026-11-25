@@ -1317,8 +1317,10 @@ class Entity:
             _require_unpaged,
         )
 
-        # Deleting is a write: refused to a caller who does not own the entity
-        self._check_owner()
+        # Deleting is a write: refused to a caller who does not own the entity,
+        # and to older code for a row newer code stored, whose index entries
+        # this code may not know of
+        self._check_write()
 
         # Call hook before deletion
         allow, _ = call_entity_hook(self, None, self, None, ACTION_DELETE)

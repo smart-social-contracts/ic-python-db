@@ -627,21 +627,26 @@ class TestMixins:
         db = Database.get_instance()
         team, red = Team(name="t"), Label(name="red")
 
-        def unowned():
+        def unowned(tagged=False):
             row_id = str(Member.max_id() + 1)
             db.save("Member", row_id, {"_type": "Member", "_id": row_id, "tag": "a"})
             db.save("_system", "Member_id", row_id)
             db.save("_system", "Member_count", str(Member.count() + 1))
             db.field_index_add("Member", "tag", "a", row_id)
+            if tagged:  # linked as stored, so the path's write is the row's first
+                db.reverse_index_add("Member", row_id, "tags", red._id)
+                db.reverse_index_add("Label", red._id, "members", row_id)
             db.clear_registry()
             member = Member.load(row_id)
             assert member._owner is None
             return member
 
-        def owned_by_system():
-            row_id = Member(tag="a")._id
+        def owned_by_system(tagged=False):
+            member = Member(tag="a")
+            if tagged:
+                member.tags.add(red)
             db.clear_registry()
-            member = Member.load(row_id)
+            member = Member.load(member._id)
             assert member._owner == "system"
             return member
 
@@ -650,10 +655,6 @@ class TestMixins:
 
         def add_red(m):
             m.tags.add(red)
-
-        def discard_red(m):
-            m.tags.add(red)
-            m.tags.discard(red)
 
         paths = {  # name: (write, what it must have done)
             "field": (
@@ -677,7 +678,7 @@ class TestMixins:
                 lambda m: m._id in [e._id for e in red.members],
             ),
             "many-to-many discard": (
-                discard_red,
+                lambda m: m.tags.discard(red),
                 lambda m: m._id not in [e._id for e in red.members],
             ),
             "one-to-one": (
@@ -702,7 +703,7 @@ class TestMixins:
         }
         for name, (write, done) in paths.items():
             for kind in (unowned, owned_by_system):
-                member = kind()
+                member = kind(tagged=name == "many-to-many discard")
                 try:
                     write(member)
                 except PermissionError as e:

@@ -127,6 +127,25 @@ class TestAudit:
         # The _db_audit attribute should be None when audit_enabled=False
         assert db_no_audit._db_audit is None
 
+    def test_audit_counters_survive_a_new_database_on_the_same_store(self):
+        """An upgrade builds a new Database on the stable maps that survive it.
+        It reset _min_id and _max_id, so the next records overwrote the
+        oldest (issue #19, item 1)."""
+        main_store, audit_store = MemoryStorage(), MemoryStorage()
+        Database._instance = None
+        Database.init(db_storage=main_store, db_audit=audit_store, audit_enabled=True)
+        Database.get_instance().save("Note", "1", {"text": "a"})
+        before = audit_store.get("_max_id")
+        first = audit_store.get("0")
+        assert int(before) > 0
+
+        Database._instance = None  # the upgrade: the heap is gone, the maps stay
+        Database.init(db_storage=main_store, db_audit=audit_store, audit_enabled=True)
+        assert audit_store.get("_max_id") == before
+        Database.get_instance().save("Note", "2", {"text": "b"})
+        assert audit_store.get("0") == first
+        self.db = Database.get_instance()  # what tearDown clears
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestAudit)

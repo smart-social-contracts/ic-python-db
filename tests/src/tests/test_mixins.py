@@ -597,6 +597,68 @@ class TestMixins:
         assert db.load("Doc", doc._id) is None
         assert Doc.count_by("tag", "a") == 0
 
+    def test_rows_of_code_that_never_sets_a_caller_stay_writable(self):
+        """No consumer of this library sets a caller: every write runs as
+        "system", the default, and every row is owned by "system", or by
+        nobody if it was stored before its class had the mixin. Both kinds
+        must take every write path as before: fields with their indexes,
+        relations, deserialize, set_owner and delete."""
+        assert get_caller_id() == "system"
+
+        class Team(Entity, TimestampedMixin):
+            name = String()
+            members = OneToMany("Member", "team")
+
+        class Label(Entity, TimestampedMixin):
+            name = String()
+            members = ManyToMany("Member", "tags")
+
+        class Member(Entity, TimestampedMixin):
+            tag = String(indexed=True)
+            score = Integer(sorted=True)
+            team = ManyToOne("Team", "members")
+            tags = ManyToMany("Label", "members")
+
+        db = Database.get_instance()
+        first, second = Team(name="first"), Team(name="second")
+        red = Label(name="red")
+        Member(tag="a", score=1, team=first)  # owned by "system"
+        db.save("Member", "2", {"_type": "Member", "_id": "2", "tag": "a"})
+        db.save("_system", "Member_id", "2")  # stored before the mixin: no owner
+        db.save("_system", "Member_count", "2")
+        cursor = 1
+        while cursor is not None:
+            cursor = Member.rebuild_field_indexes(from_id=cursor)
+        db.clear_registry()  # a later message
+
+        for member_id in ("1", "2"):
+            member = Member.load(member_id)
+            member.tag = "b"
+            member.score = 5
+            member.team = second
+            member.tags.add(red)
+            member.tags.discard(red)
+            member.tags = [red]
+            Member.deserialize({"_type": "Member", "_id": member_id, "tag": "c"})
+            member.set_owner("system")
+            stored = db.load("Member", member_id)
+            assert stored["tag"] == "c", stored
+            assert stored["owner"] == "system", stored
+            assert member._id in [m._id for m in second.members]
+            assert member._id in [m._id for m in red.members]
+
+        assert Member.count_by("tag", "a") == 0
+        assert Member.count_by("tag", "c") == 2
+        assert [e.score for e in Member.top_by("score")[0]] == [5, 5]
+        assert list(first.members) == []
+
+        for member_id in ("1", "2"):
+            Member.load(member_id).delete()
+        assert Member.count() == 0
+        assert Member.count_by("tag", "c") == 0
+        assert list(second.members) == []
+        assert list(red.members) == []
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestMixins)

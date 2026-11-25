@@ -1,5 +1,6 @@
 """Enhanced entity implementation with support for mixins and entity types."""
 
+import json
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, TypeVar
 
 from ic_python_logging import get_logger
@@ -7,7 +8,7 @@ from ic_python_logging import get_logger
 from .constants import LEVEL_MAX_DEFAULT
 from .context import get_caller_id
 from .db_engine import Database
-from .errors import MigrationError
+from .errors import MigrationError, StaleEntityError
 
 logger = get_logger(__name__)
 
@@ -139,6 +140,8 @@ class Entity:
     # The version of a row loaded from newer code than this (after a rollback);
     # such an entity is never saved (see _hydrate)
     _newer_version: Optional[int] = None
+    # The row as this instance last read or wrote it (see _refuse_if_stale)
+    _synced: Optional[dict] = None
     __version__ = 1  # Default schema version
     __namespace__: Optional[str] = None  # Optional namespace for entity type
 
@@ -210,6 +213,9 @@ class Entity:
         # Register this type with the database (using full type name)
         self.db().register_entity_type(self.__class__, self._type)
 
+        # The id counter as it was before this entity moved it, to give the id
+        # back if the constructor fails (None: it did not move it)
+        counter_before = None
         # Generate ID if not provided, or update max_id if custom ID is higher
         if self._id is None:
             db = self.db()
@@ -220,6 +226,7 @@ class Entity:
             next_id = str(int(current_id) + 1)
             self._id = next_id
             db.save("_system", f"{type_name}_id", self._id)
+            counter_before = current_id
         elif not self._loaded:
             # Update max_id if custom ID is higher than current max.
             # Skipped when hydrating persisted state: that id already went
@@ -241,6 +248,7 @@ class Entity:
                 current_max_int = int(current_max_id)
                 if custom_id_int > current_max_int:
                     db.save("_system", f"{type_name}_id", self._id)
+                    counter_before = current_max_id
             except ValueError:
                 # If custom ID is not numeric, don't update max_id counter
                 pass
@@ -265,7 +273,14 @@ class Entity:
             self._hydrating = False
 
             if not self._loaded:
+                # A new entity is filed in its indexes only now, with every
+                # argument applied and the defaults of the others: an argument
+                # refused after an indexed one leaves no entry behind.
+                alias = getattr(type(self), "__alias__", None)
+                if alias:
+                    self._refuse_taken_alias(getattr(self, alias, None))
                 self._save()
+                self._index_new()
         except Exception:
             # It was registered above, before its fields. In a canister the
             # identity map keeps it until the message ends, so the next load of
@@ -273,7 +288,55 @@ class Entity:
             db = self.db()
             if db.get_entity(self._type, self._id) is self:
                 db.unregister_entity(self._type, self._id)
+            if not self._loaded:
+                self._undo_unsaved(counter_before)
             raise
+
+    def _index_new(self) -> None:
+        """File a new entity in its field and sorted indexes (see __init__)."""
+        db = self.db()
+        for name in self._indexed_properties():
+            value = getattr(self, name, None)
+            if value is not None:
+                db.field_index_add(self._type, name, str(value), self._id)
+        self._sync_sorted()
+
+    def _undo_unsaved(self, counter_before: Optional[str]) -> None:
+        """Take back what a constructor that failed before the row was saved
+        wrote: the links its relation arguments made, and the id it took.
+
+        The id goes back only if no later entity has taken one since.
+        """
+        self._unlink_relations()
+        db = self.db()
+        if self._counted:  # the save counted the row, then failed
+            count_key = f"{self._type}_count"
+            db.save("_system", count_key, str(int(db.load("_system", count_key)) - 1))
+        if counter_before is not None:
+            counter_key = f"{self._type}_id"
+            if db.load("_system", counter_key) == self._id:
+                db.save("_system", counter_key, counter_before)
+
+    def _refuse_taken_alias(self, value: Any) -> None:
+        """Raise ValueError if another row holds ``value`` in the alias field.
+
+        The alias entry names one row: a second row with the same value took it
+        over, and deleting that row left the first one unfound by its alias.
+        An entry whose row is gone, or no longer holds the value, is stale, and
+        is taken over.
+        """
+        if value is None:
+            return
+        field = type(self).__alias__
+        db = self.db()
+        holder = db.load(self._alias_key(), str(value))
+        if holder is None or holder == self._id:
+            return
+        row = db.load(self._type, holder)
+        if row is not None and field in row and str(row[field]) == str(value):
+            raise ValueError(
+                f"{self._type}: {field} {value!r} is taken by {self._type}@{holder}"
+            )
 
     @classmethod
     def new(cls, **kwargs):
@@ -323,7 +386,36 @@ class Entity:
         not make had already moved them.
         """
         self._refuse_if_newer()
+        self._refuse_if_stale()
         self._check_owner()
+
+    def _refuse_if_stale(self) -> None:
+        """Raise StaleEntityError if another message changed this row after
+        this instance read or wrote it.
+
+        The identity map is emptied when a message starts, so an instance some
+        code holds across one (an endpoint that awaits another canister) is no
+        longer the one a load returns. A save writes every field it holds, and
+        would put back what the other message wrote, or bring back a row it
+        deleted. Only such an instance is checked, at one read per write.
+        """
+        if not self._loaded:
+            return
+        db = self.db()
+        current = db.get_entity(self._type, self._id)
+        if current is self:
+            return
+        stored = db.load(self._type, self._id)
+        if json.dumps(stored, sort_keys=True) != json.dumps(
+            self._synced, sort_keys=True
+        ):
+            raise StaleEntityError(
+                f"{self._type}@{self._id} was changed by another message since "
+                f"this instance read it: load it again"
+            )
+        # Unchanged: this is the current instance again. Another one loaded in
+        # this message is then the stale one, and its next write is checked.
+        db.register_entity(self)
 
     def _refuse_if_newer(self) -> None:
         """Raise MigrationError if this row was stored by newer code."""
@@ -347,6 +439,8 @@ class Entity:
             MigrationError: If the row was stored by newer code (see _hydrate)
         """
         self._refuse_if_newer()
+        if not self._migrating:
+            self._refuse_if_stale()
 
         # Use full type name (including namespace) for system counters and storage
         type_name = self._type
@@ -388,6 +482,7 @@ class Entity:
             logger.debug(f"Saving entity {self._type}@{self._id} to database")
             db = self.db()
             db.save(self._type, self._id, data)
+            self._synced = data
             if hasattr(self.__class__, "__alias__") and self.__class__.__alias__:
                 alias_field = self.__class__.__alias__
                 if hasattr(self, alias_field):
@@ -578,6 +673,7 @@ class Entity:
             # older version and the newer code would then migrate it again.
             entity = cls(**data, _loaded=True)
             entity._newer_version = stored_version
+            entity._synced = data
             return entity
 
         if stored_version != current_version:
@@ -586,6 +682,7 @@ class Entity:
 
         # Create instance first
         entity = cls(**data, _loaded=True)
+        entity._synced = data  # replaced by the save below, if it migrates
 
         # If migration was applied, persist the migrated data and move its
         # index entries along with any value migrate() changed
@@ -1310,17 +1407,12 @@ class Entity:
         logger.debug(f"Deleting entity {self._type}@{self._id}")
         from .constants import ACTION_DELETE
         from .hooks import call_entity_hook
-        from .properties import (
-            ManyToMany,
-            ManyToOne,
-            OneToMany,
-            OneToOne,
-            _require_unpaged,
-        )
+        from .properties import ManyToMany, _require_unpaged
 
         # Deleting is a write: refused to a caller who does not own the entity,
-        # and to older code for a row newer code stored, whose index entries
-        # this code may not know of
+        # to older code for a row newer code stored, whose index entries this
+        # code may not know of, and through an instance another message has
+        # made stale (its index entries are found from the values it holds)
         self._check_write()
 
         # Call hook before deletion
@@ -1343,7 +1435,55 @@ class Entity:
                         f"first .discard() its {attr_name} page by page",
                     )
 
-        # Clean up reverse indexes for all relation properties
+        self._unlink_relations()
+
+        # Clean up reverse counters other entity types keep on *this* entity
+        # via unidirectional ManyToMany relations targeting our type. Their
+        # forward indexes may retain a dangling ID (skipped on load); the
+        # counter itself must not outlive us.
+        for reverse_name in db.reverse_count_names(self._type):
+            db.reverse_count_delete(self._type, self._id, reverse_name)
+
+        # Remove from field indexes (issue #11)
+        for field_name in self._indexed_properties():
+            value = getattr(self, field_name, None)
+            if value is not None:
+                db.field_index_remove(self._type, field_name, str(value), self._id)
+
+        for name in self._sorted_indexes():
+            db.sorted_index_set(self._type, name, self._id, None)
+
+        db.delete(self._type, self._id)
+
+        # Remove from entity registry
+        db.unregister_entity(self._type, self._id)
+
+        # Decrement the count when an entity is deleted
+        type_name = self.__class__.get_full_type_name()
+        count_key = f"{type_name}_count"
+        current_count = int(db.load("_system", count_key) or 0)
+        if current_count > 0:
+            db.save("_system", count_key, str(current_count - 1))
+        else:
+            raise ValueError(
+                f"Entity count for {type_name} is already zero; cannot decrement further."
+            )
+
+        # Remove from alias mappings when deleted
+        if hasattr(self.__class__, "__alias__") and self.__class__.__alias__:
+            alias_field = self.__class__.__alias__
+            if hasattr(self, alias_field):
+                alias_value = getattr(self, alias_field)
+                if alias_value is not None:
+                    self._drop_alias_entry(alias_field, alias_value)
+
+        logger.debug(f"Deleted entity {self._type}@{self._id}")
+
+    def _unlink_relations(self) -> None:
+        """Remove this entity from the reverse index of every relation it is in."""
+        from .properties import ManyToMany, ManyToOne, OneToMany, OneToOne
+
+        db = self.db()
         for cls in reversed(self.__class__.__mro__):
             for attr_name, attr_value in cls.__dict__.items():
                 if attr_name.startswith("_"):
@@ -1406,48 +1546,6 @@ class Entity:
                                 break
                     # Delete own index
                     db.reverse_index_delete(self._type, self._id, attr_name)
-
-        # Clean up reverse counters other entity types keep on *this* entity
-        # via unidirectional ManyToMany relations targeting our type. Their
-        # forward indexes may retain a dangling ID (skipped on load); the
-        # counter itself must not outlive us.
-        for reverse_name in db.reverse_count_names(self._type):
-            db.reverse_count_delete(self._type, self._id, reverse_name)
-
-        # Remove from field indexes (issue #11)
-        for field_name in self._indexed_properties():
-            value = getattr(self, field_name, None)
-            if value is not None:
-                db.field_index_remove(self._type, field_name, str(value), self._id)
-
-        for name in self._sorted_indexes():
-            db.sorted_index_set(self._type, name, self._id, None)
-
-        db.delete(self._type, self._id)
-
-        # Remove from entity registry
-        db.unregister_entity(self._type, self._id)
-
-        # Decrement the count when an entity is deleted
-        type_name = self.__class__.get_full_type_name()
-        count_key = f"{type_name}_count"
-        current_count = int(db.load("_system", count_key) or 0)
-        if current_count > 0:
-            db.save("_system", count_key, str(current_count - 1))
-        else:
-            raise ValueError(
-                f"Entity count for {type_name} is already zero; cannot decrement further."
-            )
-
-        # Remove from alias mappings when deleted
-        if hasattr(self.__class__, "__alias__") and self.__class__.__alias__:
-            alias_field = self.__class__.__alias__
-            if hasattr(self, alias_field):
-                alias_value = getattr(self, alias_field)
-                if alias_value is not None:
-                    db.delete(self._alias_key(), alias_value)
-
-        logger.debug(f"Deleted entity {self._type}@{self._id}")
 
     def _serialize_base(self) -> Dict[str, Any]:
         """Shared serialization logic: core data, properties, and instance attributes."""
@@ -1561,6 +1659,23 @@ class Entity:
                         ]
 
         return data
+
+    def _undo_merge(self, before: dict) -> None:
+        """Put back the fields a failed deserialize() merged, and their index,
+        sorted and alias entries: the row was not saved, so the instance and
+        its entries must say what the row says."""
+        from .properties import PROPERTY_STORAGE_PREFIX
+
+        merged = dict(self.__dict__)
+        self.__dict__.clear()
+        self.__dict__.update(before)
+        for name in self._property_names():
+            prop = getattr(type(self), name)
+            key = f"_{PROPERTY_STORAGE_PREFIX}_{name}"
+            new = merged.get(key, prop.default)
+            old = before.get(key, prop.default)
+            if new != old:
+                prop._move_entries(self, new, old)
 
     @classmethod
     def _without_mixin_state(cls, data: dict) -> dict:
@@ -1684,42 +1799,31 @@ class Entity:
 
             # Refuse now: the fields merged below run hooks and move index
             # entries, and the save that would refuse comes after all of them
-            existing_entity._check_owner()
-            existing_entity._refuse_if_newer()
+            existing_entity._check_write()
 
-            # Store old alias value for cleanup if it changes
-            old_alias_value = None
-            if hasattr(cls, "__alias__") and cls.__alias__:
-                alias_field = cls.__alias__
-                if hasattr(existing_entity, alias_field):
-                    old_alias_value = getattr(existing_entity, alias_field)
-
-            # Update properties (merge mode - only update provided fields)
+            # Update properties (merge mode - only update provided fields).
+            # Each one moves its own index and alias entries; the row is saved
+            # once, below. A field that raises must not leave saving off: the
+            # entity stays in the identity map for the rest of the message.
+            before = dict(existing_entity.__dict__)
             existing_entity._do_not_save = True
-            for key, value in data.items():
-                if key.startswith("_"):
-                    continue  # Skip internal fields
+            try:
+                for key, value in data.items():
+                    if key.startswith("_"):
+                        continue  # Skip internal fields
 
-                # Check if this is a relation property
-                prop = getattr(cls, key, None)
-                if isinstance(prop, Relation):
-                    continue  # Skip relations for now, handle them after
+                    # Check if this is a relation property
+                    prop = getattr(cls, key, None)
+                    if isinstance(prop, Relation):
+                        continue  # Skip relations for now, handle them after
 
-                # Update the property
-                setattr(existing_entity, key, value)
-
-            # Handle alias update if alias field changed
-            if hasattr(cls, "__alias__") and cls.__alias__:
-                alias_field = cls.__alias__
-                if alias_field in data:
-                    new_alias_value = data[alias_field]
-                    if old_alias_value != new_alias_value:
-                        # Remove old alias mapping
-                        if old_alias_value is not None:
-                            cls.db().delete(cls._alias_key(), str(old_alias_value))
-                        # New alias mapping will be created when entity is saved
-
-            existing_entity._do_not_save = False
+                    # Update the property
+                    setattr(existing_entity, key, value)
+            except Exception:
+                existing_entity._undo_merge(before)
+                raise
+            finally:
+                existing_entity._do_not_save = False
 
             # Attempt to resolve relations (silently skip if related entity doesn't exist)
             for key, value in data.items():

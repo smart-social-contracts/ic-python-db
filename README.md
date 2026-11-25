@@ -84,6 +84,8 @@ Person["name", "John"]     # Lookup by field "name" only
 | `Person["John"]` | Try `_id` first, then `__alias__` field |
 | `Person["name", "John"]` | Lookup by specific field `name` only |
 
+An alias value names one row: creating or renaming a row to a value another row holds raises `ValueError`.
+
 Then use the defined entities to store objects:
 
 ```python

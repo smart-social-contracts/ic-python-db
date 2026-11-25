@@ -193,13 +193,11 @@ class Database:
         if self._audit_enabled:
             self._db_audit = db_audit if db_audit else MemoryStorage()
 
-        if self._db_audit:
+        # A persistent audit store keeps its counters across an upgrade: reset,
+        # the next records would overwrite the oldest ones
+        if self._db_audit and self._db_audit.get("_max_id") is None:
             self._db_audit.insert("_min_id", "0")
             self._db_audit.insert("_max_id", "0")
-
-            logger.debug(
-                f"Audit database initialized with {len(list(self._db_audit.items()))} items"
-            )
 
         self._entity_types = {}
         # {target class name: reverse counter names}, built by the first

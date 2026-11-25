@@ -133,6 +133,29 @@ class TestAliasAndProperties:
         AlPerson.load("2").delete()
         assert AlPerson["anna"]._id == p._id
 
+    def test_after_deleting_the_duplicate_the_entry_names_rebuild_refiles_the_rest(
+        self,
+    ):
+        """Duplicates an older release stored: the entry names the one saved
+        last. Deleting it leaves the other unfound by its alias until
+        rebuild_alias_index files it again (CHANGELOG, Upgrading)."""
+        AlPerson = self._people()
+        db = Database.get_instance()
+        for row_id in ("1", "2"):
+            db.save(
+                "AlPerson", row_id, {"_type": "AlPerson", "_id": row_id, "name": "anna"}
+            )
+        db.save(AlPerson._alias_key(), "anna", "2")  # saved last
+        db.save("_system", "AlPerson_id", "2")
+        db.save("_system", "AlPerson_count", "2")
+
+        AlPerson.load("2").delete()
+        assert AlPerson["anna"] is None
+        cursor = 1
+        while cursor is not None:
+            cursor = AlPerson.rebuild_alias_index(from_id=cursor)
+        assert AlPerson["anna"]._id == "1"
+
     def test_a_stale_alias_entry_is_taken_over(self):
         """An entry whose row is gone, or no longer holds the value, does not
         refuse the value to another row."""

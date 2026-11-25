@@ -814,6 +814,29 @@ class TestEntity:
         assert CxItem.count_by("owner", "bob") == 1
         assert [m._id for m in team.members] == ["1"]
 
+    def test_a_refused_field_leaves_the_link_a_one_to_one_argument_would_clear(
+        self,
+    ):
+        """Linking a OneToOne can clear the link its target has and save the
+        target. A field refused in the same constructor must come first: the
+        target is another row, and nothing takes that write back."""
+
+        class CxPerson(Entity):
+            name = String()
+            profile = OneToOne("CxProfile", "person")
+
+        class CxProfile(Entity):
+            name = String()
+            person = OneToOne("CxPerson", "profile")
+
+        db = Database.get_instance()
+        alice, card = CxPerson(name="alice"), CxProfile(name="card")
+        card.person = alice  # the link is stored on the card
+        Tester.assert_raises(TypeError, CxPerson, profile=card, name=123)
+        assert db.load("CxProfile", card._id)["person"] == alice._id
+        assert card.person._id == alice._id
+        assert alice.profile._id == card._id
+
     def test_a_failed_constructor_gives_back_only_an_id_nobody_took_since(self):
         """If another entity took a later id while the constructor ran (its
         hook made one), the counter is left alone: the id stays unused."""

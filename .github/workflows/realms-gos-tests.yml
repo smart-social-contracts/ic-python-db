@@ -1,0 +1,57 @@
+name: realms-gos tests against this library
+
+# Why this exists: ic-python-db's CI cannot see how a consumer subclasses
+# Property, and realms-gos's CI tests against the ic-python-db version it pins,
+# an older one. So the combination an upgrade produces, this library under the
+# realms' code and the rows they stored, is tested by nobody else. #61 passed
+# every check in both repos and would have made every row of a previous version
+# unreadable in a realm; running realms-gos's tests/ggg against the candidate is
+# what found it.
+#
+# release.yml waits for this, and any failure stops the release: do not make it
+# optional, or keep a list of failures to ignore, because it is slow or red.
+# It also runs on a pull request that changes this file.
+
+on:
+  workflow_call:
+  pull_request:
+    branches: [ main ]
+    paths: [ .github/workflows/realms-gos-tests.yml ]
+
+permissions:
+  contents: read
+
+jobs:
+  tests-ggg:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out this library (the candidate)
+      uses: actions/checkout@v4
+      with:
+        path: ic-python-db
+
+    - name: Check out realms-gos main
+      uses: actions/checkout@v4
+      with:
+        repository: smart-social-contracts/realms-gos
+        path: realms-gos
+        submodules: recursive
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install realms-gos as its CI does, then this library over its pin
+      run: |
+        pip install -e realms-gos/cli/
+        pip install -r realms-gos/requirements.txt
+        pip install pytest pytest-cov cedarpy==4.12.2
+        pip install ./ic-python-db
+        python -c "import ic_python_db as d; print('ic-python-db', d.__version__, d.__file__)"
+
+    - name: realms-gos tests/ggg, plain and strict
+      working-directory: realms-gos
+      run: |
+        pytest -q tests/ggg
+        GGG_MIRROR=strict pytest -q tests/ggg

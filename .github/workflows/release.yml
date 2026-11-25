@@ -20,7 +20,13 @@ on:
           - major
 
 jobs:
+  # The candidate must pass realms-gos's tests/ggg first: see the comment in
+  # realms-gos-tests.yml for why this gate exists and must stay blocking.
+  realms-gos-tests:
+    uses: ./.github/workflows/realms-gos-tests.yml
+
   release:
+    needs: realms-gos-tests
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -427,9 +427,15 @@ class Entity:
     def _auto_migrate_defaults(cls, data: dict) -> dict:
         """Inject default values for new Property fields not present in stored data.
 
-        Called before migrate() during version-mismatch loads so that developers
-        don't need to write migrate() for the trivial case of adding a field
-        with a default value.
+        Called after migrate() during version-mismatch loads, for the fields it
+        did not set, so that developers don't need to write migrate() for the
+        trivial case of adding a field with a default value.
+
+        A field that converts (``Property._converts``) is left out: its default
+        is in the converted form (``Json``'s is the text ``"[]"``), the row is
+        built through its ``__set__``, which would convert it again, and the
+        old row would read the text instead of the list. Left out, the field
+        reads its default, as on a row stored after it was added.
         """
         from .properties import Property
 
@@ -437,9 +443,13 @@ class Entity:
             for attr_name, attr_value in klass.__dict__.items():
                 if attr_name.startswith("_"):
                     continue
-                if isinstance(attr_value, Property) and attr_name not in data:
-                    if attr_value.default is not None:
-                        data[attr_name] = attr_value.default
+                if (
+                    isinstance(attr_value, Property)
+                    and attr_name not in data
+                    and attr_value.default is not None
+                    and not attr_value._converts()
+                ):
+                    data[attr_name] = attr_value.default
         return data
 
     @classmethod

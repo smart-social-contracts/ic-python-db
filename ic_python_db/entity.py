@@ -1409,10 +1409,10 @@ class Entity:
         from .properties import ManyToMany, _require_unpaged
 
         # Deleting is a write: refused to a caller who does not own the entity,
-        # and through an instance another message has made stale (its index
-        # entries are found from the values it holds)
-        self._refuse_if_stale()
-        self._check_owner()
+        # to older code for a row newer code stored, whose index entries this
+        # code may not know of, and through an instance another message has
+        # made stale (its index entries are found from the values it holds)
+        self._check_write()
 
         # Call hook before deletion
         allow, _ = call_entity_hook(self, None, self, None, ACTION_DELETE)

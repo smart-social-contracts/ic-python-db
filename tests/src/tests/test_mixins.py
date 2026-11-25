@@ -600,9 +600,9 @@ class TestMixins:
     def test_rows_of_code_that_never_sets_a_caller_stay_writable(self):
         """No consumer of this library sets a caller: every write runs as
         "system", the default, and every row is owned by "system", or by
-        nobody if it was stored before its class had the mixin. Both kinds
-        must take every write path as before: fields with their indexes,
-        relations, deserialize, set_owner and delete."""
+        nobody if it was stored before its class had the mixin. Each write
+        path gets a row of each kind it has not touched yet (the first write
+        claims an unowned row, so sharing one would test it only once)."""
         assert get_caller_id() == "system"
 
         class Team(Entity, TimestampedMixin):
@@ -613,51 +613,238 @@ class TestMixins:
             name = String()
             members = ManyToMany("Member", "tags")
 
+        class Badge(Entity, TimestampedMixin):
+            name = String()
+            member = OneToOne("Member", "badge")
+
         class Member(Entity, TimestampedMixin):
             tag = String(indexed=True)
             score = Integer(sorted=True)
             team = ManyToOne("Team", "members")
             tags = ManyToMany("Label", "members")
+            badge = OneToOne("Badge", "member")
 
         db = Database.get_instance()
-        first, second = Team(name="first"), Team(name="second")
-        red = Label(name="red")
-        Member(tag="a", score=1, team=first)  # owned by "system"
-        db.save("Member", "2", {"_type": "Member", "_id": "2", "tag": "a"})
-        db.save("_system", "Member_id", "2")  # stored before the mixin: no owner
-        db.save("_system", "Member_count", "2")
-        cursor = 1
-        while cursor is not None:
-            cursor = Member.rebuild_field_indexes(from_id=cursor)
-        db.clear_registry()  # a later message
+        team, red = Team(name="t"), Label(name="red")
 
-        for member_id in ("1", "2"):
-            member = Member.load(member_id)
-            member.tag = "b"
-            member.score = 5
-            member.team = second
-            member.tags.add(red)
-            member.tags.discard(red)
-            member.tags = [red]
-            Member.deserialize({"_type": "Member", "_id": member_id, "tag": "c"})
-            member.set_owner("system")
-            stored = db.load("Member", member_id)
-            assert stored["tag"] == "c", stored
-            assert stored["owner"] == "system", stored
-            assert member._id in [m._id for m in second.members]
-            assert member._id in [m._id for m in red.members]
+        def unowned():
+            row_id = str(Member.max_id() + 1)
+            db.save("Member", row_id, {"_type": "Member", "_id": row_id, "tag": "a"})
+            db.save("_system", "Member_id", row_id)
+            db.save("_system", "Member_count", str(Member.count() + 1))
+            db.field_index_add("Member", "tag", "a", row_id)
+            db.clear_registry()
+            member = Member.load(row_id)
+            assert member._owner is None
+            return member
 
-        assert Member.count_by("tag", "a") == 0
-        assert Member.count_by("tag", "c") == 2
-        assert [e.score for e in Member.top_by("score")[0]] == [5, 5]
-        assert list(first.members) == []
+        def owned_by_system():
+            row_id = Member(tag="a")._id
+            db.clear_registry()
+            member = Member.load(row_id)
+            assert member._owner == "system"
+            return member
 
-        for member_id in ("1", "2"):
-            Member.load(member_id).delete()
-        assert Member.count() == 0
-        assert Member.count_by("tag", "c") == 0
-        assert list(second.members) == []
-        assert list(red.members) == []
+        def stored(m):
+            return db.load("Member", m._id)
+
+        def add_red(m):
+            m.tags.add(red)
+
+        def discard_red(m):
+            m.tags.add(red)
+            m.tags.discard(red)
+
+        paths = {  # name: (write, what it must have done)
+            "field": (
+                lambda m: setattr(m, "tag", "b"),
+                lambda m: m._id in [e._id for e in Member.find_by("tag", "b")[0]],
+            ),
+            "sorted field": (
+                lambda m: setattr(m, "score", 5),
+                lambda m: m._id in [e._id for e in Member.top_by("score")[0]],
+            ),
+            "many-to-one": (
+                lambda m: setattr(m, "team", team),
+                lambda m: m._id in [e._id for e in team.members],
+            ),
+            "many-to-many set": (
+                lambda m: setattr(m, "tags", [red]),
+                lambda m: m._id in [e._id for e in red.members],
+            ),
+            "many-to-many add": (
+                add_red,
+                lambda m: m._id in [e._id for e in red.members],
+            ),
+            "many-to-many discard": (
+                discard_red,
+                lambda m: m._id not in [e._id for e in red.members],
+            ),
+            "one-to-one": (
+                lambda m: setattr(m, "badge", Badge(name=f"b{m._id}")),
+                lambda m: m.badge is not None and m.badge.member._id == m._id,
+            ),
+            "deserialize": (
+                lambda m: Member.deserialize(
+                    {"_type": "Member", "_id": m._id, "tag": "c"}
+                ),
+                lambda m: stored(m)["tag"] == "c",
+            ),
+            "set_owner": (
+                lambda m: m.set_owner("system"),
+                lambda m: stored(m)["owner"] == "system",
+            ),
+            "delete": (
+                lambda m: m.delete(),
+                lambda m: stored(m) is None
+                and m._id not in [e._id for e in Member.find_by("tag", "a")[0]],
+            ),
+        }
+        for name, (write, done) in paths.items():
+            for kind in (unowned, owned_by_system):
+                member = kind()
+                try:
+                    write(member)
+                except PermissionError as e:
+                    assert False, f"{name} on a row {kind.__name__}: {e}"
+                assert done(member), (name, kind.__name__, stored(member))
+
+    def test_rows_of_code_that_never_sets_a_caller_migrate_on_load(self):
+        """A version bump migrates rows of both kinds when they are read, and
+        they take a write afterwards."""
+        assert get_caller_id() == "system"
+
+        class Old(Entity, TimestampedMixin):
+            __version__ = 1
+            tag = String(indexed=True)
+
+        db = Database.get_instance()
+        Old(tag="a")  # owned by "system"
+        db.save("Old", "2", {"_type": "Old", "_id": "2", "tag": "a"})
+        db.save("_system", "Old_id", "2")
+        db.save("_system", "Old_count", "2")
+        db.clear_registry()
+
+        class Old(Entity, TimestampedMixin):  # the same type, new code
+            __version__ = 2
+            tag = String(indexed=True)
+            note = String(default="")
+
+        db.register_entity_type(Old)
+        for row_id, owner in (("1", "system"), ("2", None)):
+            row = Old.load(row_id)
+            assert db.load("Old", row_id)["__version__"] == 2
+            assert db.load("Old", row_id).get("owner") == owner
+            row.note = "after the migration"
+            assert db.load("Old", row_id)["note"] == "after the migration"
+
+    def test_a_refused_one_to_one_write_changes_nothing_on_either_side(self):
+        """Linking a OneToOne can clear a link another entity holds, and save
+        that entity: when it is not the caller's, nothing is cleared."""
+
+        class Person(Entity, TimestampedMixin):
+            name = String()
+            profile = OneToOne("Profile", "person")
+
+        class Profile(Entity, TimestampedMixin):
+            name = String()
+            person = OneToOne("Person", "profile")
+
+        db = Database.get_instance()
+        set_caller_id("alice")
+        alice, card = Person(name="alice"), Profile(name="card")
+        card.person = alice  # the link is stored on alice's card
+
+        # The target side: mallory links her own person to alice's card
+        set_caller_id("mallory")
+        mallory = Person(name="mallory")
+        Tester.assert_raises(PermissionError, setattr, mallory, "profile", card)
+        assert alice.profile._id == card._id
+        assert card.person._id == alice._id
+        assert db.load("Profile", card._id)["person"] == alice._id
+        assert mallory.profile is None
+
+        # The inverse side: alice's person links to mallory's page; mallory
+        # links that page elsewhere, which would clear alice's reference
+        set_caller_id("mallory")
+        page = Profile(name="page")
+        set_caller_id("alice")
+        bob = Person(name="bob")
+        bob.profile = page
+        set_caller_id("mallory")
+        Tester.assert_raises(PermissionError, setattr, page, "person", mallory)
+        assert bob.profile._id == page._id
+        assert db.load("Person", bob._id)["profile"] == page._id
+        assert page.person._id == bob._id
+
+    def test_restoring_an_export_makes_the_importer_the_owner(self):
+        """An export restored by another caller does not keep who wrote it:
+        the importer becomes owner and creator, and the original owner can no
+        longer write the row."""
+
+        class Doc(Entity, TimestampedMixin):
+            title = String()
+
+        db = Database.get_instance()
+        set_caller_id("alice")
+        exported = Doc(title="v1").serialize()
+        assert exported["owner"] == "alice"
+        db.clear()
+
+        set_caller_id("restorer")
+        restored = Doc.deserialize(exported)
+        stored = db.load("Doc", restored._id)
+        assert (stored["owner"], stored["creator"]) == ("restorer", "restorer")
+        assert stored["title"] == "v1"
+        db.clear_registry()
+        assert self._write_is_refused(Doc.load(restored._id), "alice")
+
+    def test_a_row_with_a_creator_but_no_owner_is_claimed_by_its_next_write(self):
+        """set_owner(None) used to leave a row with a creator and no owner,
+        which any caller could write. Its next write makes the writer the
+        owner; the creator stays."""
+
+        class Doc(Entity, TimestampedMixin):
+            title = String(default="")
+
+        db = Database.get_instance()
+        db.save(
+            "Doc",
+            "1",
+            {
+                "_type": "Doc",
+                "_id": "1",
+                "title": "v1",
+                "creator": "alice",
+                "owner": None,
+            },
+        )
+        db.save("_system", "Doc_id", "1")
+        set_caller_id("bob")
+        Doc.load("1").title = "v2"
+        stored = db.load("Doc", "1")
+        assert (stored["owner"], stored["creator"]) == ("bob", "alice"), stored
+        assert self._write_is_refused(Doc.load("1"), "mallory")
+
+    def test_older_code_cannot_delete_a_row_newer_code_stored(self):
+        """It may not know the newer code's index entries, so a delete would
+        leave them behind: refused like a write."""
+
+        class Note(Entity):
+            __version__ = 2
+            text = String()
+
+        note_id = Note(text="a")._id
+        db = Database.get_instance()
+        db.clear_registry()
+
+        class Note(Entity):  # rolled back
+            __version__ = 1
+            text = String()
+
+        db.register_entity_type(Note)
+        Tester.assert_raises(MigrationError, Note.load(note_id).delete)
+        assert db.load("Note", note_id) is not None
 
 
 def run(test_name: str = None, test_var: str = None):

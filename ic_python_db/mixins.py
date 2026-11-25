@@ -47,6 +47,10 @@ class TimestampedMixin:
             self._owner = caller_id
             # A row saved by a migration, before it was claimed, stores "None"
             self.__dict__.pop("timestamp_created", None)
+        if self._owner is None:
+            # Claimed but left without an owner: set_owner(None) allowed it
+            # before 0.17, and any caller could write such a row
+            self._owner = caller_id
         if self._new_owner is not None:
             self._owner = self._new_owner
 

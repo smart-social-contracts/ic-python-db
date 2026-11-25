@@ -41,8 +41,10 @@ def run(test_name: str = None, test_var: str = None):
     except PermissionError:
         pass  # Expected behavior
 
-    # Change owner and try again
+    # The owner hands it over, and the new owner tries again
+    set_caller_id("system")
     user.set_owner("alice")
+    set_caller_id("alice")
     user.age = 31  # Type checking and validation happens automatically
     assert user._owner == "alice"
     assert user.age == 31

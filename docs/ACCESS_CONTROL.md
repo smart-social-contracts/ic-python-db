@@ -31,13 +31,22 @@ with db.as_user("bob"):
     doc2 = Document(title="Bob's Doc")  # Owner: bob
 ```
 
-`TimestampedMixin` raises `PermissionError` when an entity is saved by a caller other than its owner. The owner is stored with the row and read back when the row is loaded, so the check holds on an entity loaded in a later message as on the instance that created it. What the check does not do:
+`TimestampedMixin` raises `PermissionError` when an entity is saved by a caller other than its owner. The owner is stored with the row and read back when the row is loaded, so the check holds on an entity loaded in a later message as on the instance that created it.
+
+Who may claim and write:
+
+- The first save of an entity claims it: the caller becomes its creator and owner.
+- After that, only the owner may write it, and only the owner may give it away: `entity.set_owner(new_owner)` is a write, refused like any other to a caller who does not own the entity. It stores the transfer at once and records the caller as the updater.
+- A caller id and an owner are non-empty strings. `set_caller_id`, `as_user` and `set_owner` raise `ValueError` for `None` or `""`: inside the mixin, no owner means "not claimed yet", which any caller may write.
+- `deserialize()` ignores the `owner`, `creator`, `updater`, `timestamp_created` and `timestamp_updated` in the data. An import claims a new row for the caller, and an update records the caller as the updater, as any other write does.
+
+What the check does not do:
 
 - It trusts the caller id your code sets (`set_caller_id`, `as_user`).
-- `set_owner` is not checked: any code that can reach an entity can call `entity.set_owner(caller)` and then write.
+- The state is kept in plain attributes (`_owner`, `_creator`, `_updater`). Python cannot stop code that holds the instance from assigning them; the check covers the library's own paths, not that.
 - A class that declares its own field named `owner`, `creator`, `updater`, `timestamp_created` or `timestamp_updated` keeps that field's value in the row, so the mixin's state is not restored on load: for such a class the check does not hold after a load.
 
-A row stored before its class had the mixin has no owner, and the first caller to save it becomes its creator and owner. Loading a row, even one that has to be migrated, claims no ownership and sets no updater or timestamp.
+A row stored before its class had the mixin has no owner, and the first caller to save it (or to `set_owner` it) becomes its creator. Loading a row, even one that has to be migrated, claims no ownership and sets no updater or timestamp.
 
 ## Access Control Pattern
 

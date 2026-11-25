@@ -18,6 +18,17 @@ environments outside of the Internet Computer.
 _current_caller: str = "system"
 
 
+def require_id(value: object, what: str) -> None:
+    """Raise ValueError unless value is a non-empty string.
+
+    TimestampedMixin reads a missing owner (None) as "nobody has claimed this
+    yet", which any caller may write. An id that may be missing must therefore
+    never become a caller or an owner.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{what} must be a non-empty string, got {value!r}")
+
+
 def get_caller_id() -> str:
     """Get the current caller ID.
 
@@ -32,6 +43,10 @@ def set_caller_id(caller_id: str) -> None:
 
     Args:
         caller_id: ID of the caller to set
+
+    Raises:
+        ValueError: If caller_id is not a non-empty string
     """
     global _current_caller
+    require_id(caller_id, "caller id")
     _current_caller = caller_id

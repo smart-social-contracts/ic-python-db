@@ -3,7 +3,7 @@
 from tester import Tester
 
 from ic_python_db import *
-from ic_python_db.context import set_caller_id
+from ic_python_db.context import get_caller_id, set_caller_id
 
 
 class TestEntity(Entity, TimestampedMixin):
@@ -56,8 +56,10 @@ class TestMixins:
         set_caller_id("other_user")
         Tester.assert_raises(PermissionError, entity._save)
 
-        # Change owner and update
+        # The owner hands it over, then the new owner updates it
+        set_caller_id("test_user")
         entity.set_owner("other_user")
+        set_caller_id("other_user")
         system_time.advance_time(60000)  # Advance time by another minute
         entity._save()  # Should work now
 
@@ -135,11 +137,12 @@ class TestMixins:
 
         updated_at = 1_800_000_000_000
         SystemTime.get_instance().set_time(updated_at)
-        set_caller_id("bob")
+        set_caller_id("alice")
         doc = Doc.load("1")
         assert doc.serialize()["timestamp_created"] == created_text
         assert doc.serialize()["timestamp_updated"] == updated_text
         doc.set_owner("bob")
+        set_caller_id("bob")
         doc.title = "v2"
 
         stored = db.load("Doc", "1")
@@ -344,6 +347,172 @@ class TestMixins:
         stored = db.load("Box", "1")
         assert stored["owner"] == "zed"
         assert stored["creator"] == "alice"
+
+    # Who may claim and write (issues #51, #52, #53)
+
+    def _alices_doc(self):
+        class Doc(Entity, TimestampedMixin):
+            title = String(default="")
+
+        set_caller_id("alice")
+        doc = Doc(title="v1")
+        return Doc, doc
+
+    def _stored(self, doc):
+        row = Database.get_instance().load(doc._type, doc._id)
+        return {k: row[k] for k in ("title", "owner", "creator", "updater")}
+
+    def test_set_owner_is_refused_to_a_caller_who_does_not_own_the_entity(self):
+        """A caller refused a write cannot take the entity and write."""
+        Doc, doc = self._alices_doc()
+        set_caller_id("mallory")
+        Tester.assert_raises(PermissionError, doc.set_owner, "mallory")
+        assert doc._owner == "alice"
+        assert self._write_is_refused(doc, "mallory")
+        assert self._stored(doc) == {
+            "title": "v1",
+            "owner": "alice",
+            "creator": "alice",
+            "updater": "alice",
+        }
+
+    def test_set_owner_by_the_owner_is_stored_at_once(self):
+        """The transfer is the owner's write: stored without a further save,
+        so it holds in the next message, where the old owner is refused."""
+        Doc, doc = self._alices_doc()
+        doc.set_owner("bob")
+        assert self._stored(doc) == {
+            "title": "v1",
+            "owner": "bob",
+            "creator": "alice",
+            "updater": "alice",
+        }
+
+        Database.get_instance().clear_registry()  # the next message
+        doc = Doc.load(doc._id)
+        assert self._write_is_refused(doc, "alice")
+        set_caller_id("bob")
+        doc.title = "v2"
+        assert self._stored(doc)["title"] == "v2"
+        assert self._stored(doc)["updater"] == "bob"
+
+    def test_set_owner_on_an_unclaimed_row_claims_it_and_hands_it_over(self):
+        """A row stored before its class had the mixin has no owner: any
+        caller may write it, so any caller may give it away. The caller is
+        recorded as its creator."""
+
+        class Doc(Entity, TimestampedMixin):
+            title = String(default="")
+
+        db = Database.get_instance()
+        db.save("Doc", "1", {"_type": "Doc", "_id": "1", "title": "v1"})
+        db.save("_system", "Doc_id", "1")
+
+        set_caller_id("carol")
+        Doc.load("1").set_owner("dave")
+        stored = db.load("Doc", "1")
+        assert stored["owner"] == "dave", stored
+        assert stored["creator"] == "carol", stored
+        assert self._write_is_refused(Doc.load("1"), "carol")
+
+    def test_set_owner_refuses_a_missing_owner(self):
+        """None means "unclaimed", which anyone may write."""
+        Doc, doc = self._alices_doc()
+        for missing in (None, ""):
+            Tester.assert_raises(ValueError, doc.set_owner, missing)
+            assert doc._owner == "alice"
+            assert self._write_is_refused(doc, "mallory")
+            set_caller_id("alice")
+        assert self._stored(doc)["owner"] == "alice"
+
+    def test_a_missing_caller_id_is_refused(self):
+        """A None caller would claim nothing, so every save would claim the
+        row again and move its creation time."""
+        db = Database.get_instance()
+        set_caller_id("alice")
+        for missing in (None, "", 7):
+            Tester.assert_raises(ValueError, set_caller_id, missing)
+            assert get_caller_id() == "alice"
+
+            def enter_as_missing():
+                with db.as_user(missing):
+                    pass
+
+            Tester.assert_raises(ValueError, enter_as_missing)
+            assert get_caller_id() == "alice"
+
+    def test_deserialize_of_a_new_row_ignores_the_provenance_in_the_data(self):
+        """The importer claims the row: the owner, creator and updater the
+        data names are not stored, and are not left as plain attributes."""
+
+        class Doc(Entity, TimestampedMixin):
+            title = String(default="")
+
+        set_caller_id("mallory")
+        doc = Doc.deserialize(
+            {
+                "_type": "Doc",
+                "_id": "1",
+                "title": "x",
+                "owner": "alice",
+                "creator": "alice",
+                "updater": "alice",
+                "timestamp_created": "2020-01-01 00:00:00.000",
+            }
+        )
+        assert self._stored(doc) == {
+            "title": "x",
+            "owner": "mallory",
+            "creator": "mallory",
+            "updater": "mallory",
+        }
+        assert doc._owner == "mallory"
+        for name in TimestampedMixin._STATE_FIELDS:
+            assert name not in doc.__dict__, name
+        stored = Database.get_instance().load("Doc", "1")
+        assert stored["timestamp_created"] != "2020-01-01 00:00:00.000"
+
+    def test_deserialize_by_the_owner_ignores_the_provenance_in_the_data(self):
+        """An update by the owner stores the owner and updater it has, not
+        the data's, and a set_owner after it is the owner that is stored."""
+        Doc, doc = self._alices_doc()
+        Database.get_instance().clear_registry()
+        doc = Doc.deserialize(
+            {
+                "_type": "Doc",
+                "_id": doc._id,
+                "title": "y",
+                "owner": "carol",
+                "updater": "carol",
+            }
+        )
+        assert self._stored(doc) == {
+            "title": "y",
+            "owner": "alice",
+            "creator": "alice",
+            "updater": "alice",
+        }
+        assert doc.serialize()["owner"] == "alice"
+
+        doc.set_owner("bob")
+        Database.get_instance().clear_registry()  # the next message
+        set_caller_id("bob")
+        Doc.load(doc._id).title = "bob writes"
+        assert self._stored(doc)["title"] == "bob writes"
+        assert self._stored(doc)["owner"] == "bob"
+
+    def test_deserialize_keeps_a_field_named_like_the_mixin(self):
+        """A class that declares a field "owner" stores what the data gives
+        it; the mixin's own owner is still the caller."""
+
+        class Box(Entity, TimestampedMixin):
+            owner = String(default="")
+
+        set_caller_id("alice")
+        Box.deserialize({"_type": "Box", "_id": "1", "owner": "zed"})
+        stored = Database.get_instance().load("Box", "1")
+        assert stored["owner"] == "zed", stored
+        assert stored["creator"] == "alice", stored
 
 
 def run(test_name: str = None, test_var: str = None):

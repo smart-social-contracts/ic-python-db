@@ -105,7 +105,10 @@ class Property(Generic[T]):
         value before its conversion. ``_checked`` would refuse that value, and
         storing what ``_checked`` returns would have the conversion done twice
         when the row is built. Such a value is left as ``migrate()`` gave it; a
-        subclass can override this to check it its own way.
+        subclass can override this to check it its own way. An override must
+        return the value in the form ``migrate()`` gave it, never what
+        ``__set__`` would store: the row is built through ``__set__``, so that
+        form would be converted twice.
         """
         converts = (
             type(self).__set__ is not Property.__set__

@@ -134,6 +134,30 @@ class TestProperties:
         assert loaded2 in loaded1.friends
         assert loaded1 in loaded2.friends
 
+    def test_a_float_field_takes_an_int_and_an_integer_field_refuses_a_bool(self):
+        """bool is a subclass of int, and int is not a float (issue #48)."""
+
+        class PrNumbers(Entity):
+            f = Float(default=0.0, sorted=True)
+            i = Integer(default=0, indexed=True)
+
+        m = PrNumbers(f=5)
+        assert m.f == 5.0 and isinstance(m.f, float)
+        stored = Database.get_instance().load("PrNumbers", m._id)
+        assert isinstance(stored["f"], float), stored
+        m.f = 7
+        assert isinstance(m.f, float)
+        for field in ("i", "f"):
+            Tester.assert_raises(TypeError, setattr, m, field, True)
+            Tester.assert_raises(TypeError, PrNumbers, **{field: False})
+        assert m.i == 0
+        assert PrNumbers.count() == 1
+
+        class PrFlag(Entity):
+            on = Boolean(default=False)
+
+        assert PrFlag(on=True).on is True
+
 
 def run(test_name: str = None, test_var: str = None):
     Database.get_instance().clear()

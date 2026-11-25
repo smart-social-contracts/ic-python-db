@@ -263,6 +263,18 @@ class TestSorted:
             else:
                 SoVersioned.migrate = original
 
+    def test_a_row_holding_the_default_is_in_the_sorted_index(self):
+        """Issue #44, for sorted=True: the rows with the default were missing
+        from top_by."""
+
+        class SoDefault(Entity):
+            score = Integer(default=5, sorted=True)
+
+        SoDefault()
+        SoDefault(score=5)
+        SoDefault(score=9)
+        assert [e.score for e in SoDefault.top_by("score", count=10)[0]] == [9, 5, 5]
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestSorted)

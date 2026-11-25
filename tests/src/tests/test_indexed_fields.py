@@ -306,6 +306,44 @@ class TestIndexedFields:
         finally:
             db._db_storage = original
 
+    def test_a_row_holding_the_default_is_in_the_index(self):
+        """A default is never assigned, and passing it explicitly changed
+        nothing: neither row was filed under its value (issue #44)."""
+
+        class IxOrder(Entity):
+            status = String(default="open", indexed=True)
+
+        IxOrder()  # takes the default
+        IxOrder(status="open")  # passes the default
+        IxOrder(status="paid")
+        assert IxOrder.count_by("status", "open") == 2
+        assert sorted(o._id for o in IxOrder.find_by("status", "open")[0]) == [
+            "1",
+            "2",
+        ]
+        assert IxOrder.count_by("status", "paid") == 1
+
+        moved = IxOrder.load("1")
+        moved.status = "paid"
+        assert IxOrder.count_by("status", "open") == 1
+        assert IxOrder.count_by("status", "paid") == 2
+
+    def test_rebuild_files_rows_stored_with_the_default_unindexed(self):
+        """Rows stored before the fix are filed by rebuild_field_indexes."""
+
+        class IxLegacy(Entity):
+            status = String(default="open", indexed=True)
+
+        db = Database.get_instance()
+        for i in ("1", "2"):
+            db.save("IxLegacy", i, {"_type": "IxLegacy", "_id": i})
+        db.save("_system", "IxLegacy_id", "2")
+        assert IxLegacy.count_by("status", "open") == 0
+        cursor = 1
+        while cursor is not None:
+            cursor = IxLegacy.rebuild_field_indexes(from_id=cursor)
+        assert IxLegacy.count_by("status", "open") == 2
+
 
 def run(test_name: str = None, test_var: str = None):
     Database.get_instance().clear()

@@ -5,6 +5,7 @@ from tester import Tester
 from ic_python_db import (
     Database,
     Entity,
+    Integer,
     ManyToMany,
     ManyToOne,
     OneToMany,
@@ -923,6 +924,43 @@ class TestSerialization:
         assert loaded_user0.human.name == "human_0"
         assert loaded_user0.member is not None, "OneToOne reverse should be set"
         assert loaded_user0.member.alias == "mem_0"
+
+    # A deserialize() update that raises half-way (issue #54)
+
+    def test_a_failed_deserialize_changes_nothing_and_saving_stays_on(self):
+        """A type error, a validator or a hook raising on a later field: the
+        fields merged before it are put back with their index entries, and
+        the next write through the same instance is saved."""
+
+        class SeDoc(Entity):
+            tag = String(indexed=True)
+            qty = Integer()
+            code = String(max_length=3)
+
+            @staticmethod
+            def on_event(entity, field_name, old_value, new_value, action):
+                if new_value == "boom":
+                    raise RuntimeError("hook raised")
+                return True, new_value
+
+        db = Database.get_instance()
+        cases = (
+            (TypeError, {"tag": "moved", "qty": "not-a-number"}),
+            (ValueError, {"tag": "moved", "code": "toolong"}),
+            (RuntimeError, {"tag": "moved", "code": "boom"}),
+        )
+        for error, data in cases:
+            doc = SeDoc(tag="kept", qty=1, code="abc")
+            record = {"_type": "SeDoc", "_id": doc._id, **data}
+            Tester.assert_raises(error, SeDoc.deserialize, record)
+            assert doc.tag == "kept", data
+            assert SeDoc.count_by("tag", "moved") == 0, data
+            assert doc._id in [d._id for d in SeDoc.find_by("tag", "kept")[0]]
+            assert doc._do_not_save is False
+            doc.qty = 2  # the same instance, in the same message
+            stored = db.load("SeDoc", doc._id)
+            assert (stored["qty"], stored["tag"]) == (2, "kept"), (data, stored)
+            doc.delete()
 
 
 def run(test_name: str = None, test_var: str = None):

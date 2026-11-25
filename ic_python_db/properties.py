@@ -81,6 +81,12 @@ class Property(Generic[T]):
         """
         if value is None:
             return value
+        if self.type in (int, float) and isinstance(value, bool):
+            # bool is a subclass of int: True would be stored as true, and
+            # indexed as "True", where count_by(field, 1) does not find it
+            raise TypeError(f"{self.name} must be of type {self.type.__name__}")
+        if self.type is float and isinstance(value, int):
+            value = float(value)  # one type, and one sort encoding, per field
         if not isinstance(value, self.type):
             if isinstance(value, str) and self.type in (int, float, bool):
                 try:
@@ -148,23 +154,38 @@ class Property(Generic[T]):
 
         value = self._checked(modified_value)
 
+        # A new entity is filed in its indexes once its constructor has applied
+        # every argument (Entity._index_new); a stored one moves them now
+        move = obj._loaded and old_value != value
+        if move and self.name == getattr(type(obj), "__alias__", None):
+            obj._refuse_taken_alias(value)
+
         obj.__dict__[f"_{PROPERTY_STORAGE_PREFIX}_{self.name}"] = value
-
-        if self.indexed and old_value != value and obj._id is not None:
-            db = obj.db()
-            if old_value is not None:
-                db.field_index_remove(obj._type, self.name, str(old_value), obj._id)
-            if value is not None:
-                db.field_index_add(obj._type, self.name, str(value), obj._id)
-
-        if old_value != value and obj._id is not None and hasattr(obj, "_sync_sorted"):
-            obj._sync_sorted(self.name)
+        if move:
+            self._move_entries(obj, old_value, value)
 
         # The constructor, and deserialize() updating a row, save once when they
         # are done; saving after every field would serialise the row each time
         # just to throw the result away.
         if not obj._do_not_save:
             obj._save()
+
+    def _move_entries(self, obj, old_value, value) -> None:
+        """Move obj's entries for this field from old_value to value, which
+        the field already holds: its field-index entry, its sorted entries and
+        its alias entry (only one that names obj is removed)."""
+        db = obj.db()
+        if self.indexed:
+            if old_value is not None:
+                db.field_index_remove(obj._type, self.name, str(old_value), obj._id)
+            if value is not None:
+                db.field_index_add(obj._type, self.name, str(value), obj._id)
+        obj._sync_sorted(self.name)
+        if self.name == getattr(type(obj), "__alias__", None):
+            if old_value is not None:
+                obj._drop_alias_entry(self.name, old_value)
+            if value is not None:
+                db.save(obj._alias_key(), str(value), obj._id)
 
 
 class String(Property[str]):

@@ -102,6 +102,7 @@ class Property(Generic[T]):
             obj.__dict__[f"_{PROPERTY_STORAGE_PREFIX}_{self.name}"] = value
             return
 
+        obj._check_write()
         old_value = obj.__dict__.get(
             f"_{PROPERTY_STORAGE_PREFIX}_{self.name}", self.default
         )
@@ -357,6 +358,7 @@ class ManyToOne(Relation[E]):
                 obj.__dict__[f"_rel_{self.name}"] = str(value)
             return
 
+        obj._check_write()
         if value is not None:
             if isinstance(value, (list, tuple)):
                 raise ValueError(
@@ -482,6 +484,7 @@ class OneToOne(Relation[E]):
                 obj.__dict__[f"_rel_{self.name}"] = str(value)
             return
 
+        obj._check_write()
         if value is not None:
             if isinstance(value, (list, tuple)):
                 raise ValueError(
@@ -698,6 +701,7 @@ class RelationView:
     def add(self, entity):
         """Add an entity to this many-to-many relationship."""
         self._require_many_to_many("add")
+        self._owner._check_write()
         if isinstance(entity, (str, int)):
             resolved = self._prop.resolve_entity(self._owner, entity)
         elif isinstance(entity, Entity):
@@ -727,6 +731,7 @@ class RelationView:
     def discard(self, entity):
         """Remove an entity from this many-to-many relationship (no error if absent)."""
         self._require_many_to_many("discard")
+        self._owner._check_write()
         if isinstance(entity, Entity):
             entity_id = entity._id
             entity_type = entity._type
@@ -831,6 +836,7 @@ class ManyToMany(Relation[E]):
             self.validate_entity(entity)
             resolved.append(entity)
 
+        obj._check_write()
         db = Database.get_instance()
         _require_unpaged(db, obj, self.name, "set it", "use .add() and .discard()")
 

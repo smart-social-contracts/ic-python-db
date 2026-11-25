@@ -1,28 +1,14 @@
-"""Simple access control example using on_event hooks and context manager."""
+"""Simple access control example using TimestampedMixin and the context manager."""
 
-from ic_python_db import ACTION_MODIFY, ACTION_DELETE, Database, Entity, String
+from ic_python_db import Database, Entity, String
 from ic_python_db.mixins import TimestampedMixin
 
 
 class Document(Entity, TimestampedMixin):
-    """Document that only the owner can modify."""
+    """Document that only the owner can modify: the mixin refuses anyone else."""
 
     title = String()
     content = String()
-
-    @staticmethod
-    def on_event(entity, field_name, old_value, new_value, action):
-        from ic_python_db.context import get_caller_id
-
-        caller_id = get_caller_id()
-
-        # Check ownership for modifications and deletions
-        if action in (ACTION_MODIFY, ACTION_DELETE):
-            if entity._owner != caller_id:
-                print(f"❌ {caller_id} cannot modify {entity._owner}'s document")
-                return False, None
-
-        return True, new_value
 
 
 if __name__ == "__main__":
@@ -44,7 +30,7 @@ if __name__ == "__main__":
     with db.as_user("bob"):
         try:
             doc.content = "Hacked!"
-        except ValueError:
+        except PermissionError:
             print("✓ Bob was blocked from editing Alice's doc")
 
         # Bob can create his own document

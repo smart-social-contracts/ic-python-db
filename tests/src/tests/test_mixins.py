@@ -514,6 +514,89 @@ class TestMixins:
         assert stored["owner"] == "zed", stored
         assert stored["creator"] == "alice", stored
 
+    def test_a_refused_field_write_changes_nothing(self):
+        """The owner check comes before the hook, the value, the field index
+        and the sorted index: a refused caller cannot move alice's row out of
+        find_by or up in top_by."""
+        hook_calls = []
+
+        class Doc(Entity, TimestampedMixin):
+            tag = String(indexed=True)
+            score = Integer(sorted=True)
+
+            @staticmethod
+            def on_event(entity, field_name, old_value, new_value, action):
+                hook_calls.append(field_name)
+                return True, new_value
+
+        set_caller_id("alice")
+        doc = Doc(tag="a", score=1)
+        hook_calls.clear()
+        set_caller_id("mallory")
+        for field, value in (("tag", "evil"), ("score", 99)):
+            Tester.assert_raises(PermissionError, setattr, doc, field, value)
+        assert hook_calls == []
+        assert (doc.tag, doc.score) == ("a", 1)
+        assert Doc.count_by("tag", "a") == 1
+        assert Doc.count_by("tag", "evil") == 0
+        assert [(e._id, e.score) for e in Doc.top_by("score")[0]] == [(doc._id, 1)]
+
+    def test_a_refused_relation_write_changes_nothing(self):
+        """A relation's reverse index is written before the save: the owner
+        check must come first, for every way of changing a relation."""
+
+        class Team(Entity, TimestampedMixin):
+            name = String()
+            members = OneToMany("Member", "team")
+
+        class Member(Entity, TimestampedMixin):
+            name = String()
+            team = ManyToOne("Team", "members")
+            tags = ManyToMany("Label", "members")
+
+        class Label(Entity):
+            name = String()
+            members = ManyToMany("Member", "tags")
+
+        set_caller_id("alice")
+        team = Team(name="alice's")
+        red = Label(name="red")
+        member = Member(name="m", team=team)
+        member.tags.add(red)
+        set_caller_id("mallory")
+        other = Team(name="mallory's")
+        blue = Label(name="blue")
+
+        Tester.assert_raises(PermissionError, setattr, member, "team", other)
+        Tester.assert_raises(PermissionError, setattr, member, "tags", [blue])
+        Tester.assert_raises(PermissionError, member.tags.add, blue)
+        Tester.assert_raises(PermissionError, member.tags.discard, red)
+        assert [m._id for m in team.members] == [member._id]
+        assert list(other.members) == []
+        assert [t.name for t in member.tags] == ["red"]
+        assert [m._id for m in red.members] == [member._id]
+        assert list(blue.members) == []
+
+    def test_delete_is_refused_to_a_caller_who_does_not_own_the_entity(self):
+        """Deleting is a write: mallory cannot delete alice's row, alice can."""
+
+        class Doc(Entity, TimestampedMixin):
+            tag = String(indexed=True)
+
+        set_caller_id("alice")
+        doc = Doc(tag="a")
+        set_caller_id("mallory")
+        Tester.assert_raises(PermissionError, doc.delete)
+        db = Database.get_instance()
+        assert db.load("Doc", doc._id) is not None
+        assert Doc.count() == 1
+        assert Doc.count_by("tag", "a") == 1
+
+        set_caller_id("alice")
+        doc.delete()
+        assert db.load("Doc", doc._id) is None
+        assert Doc.count_by("tag", "a") == 0
+
 
 def run(test_name: str = None, test_var: str = None):
     tester = Tester(TestMixins)

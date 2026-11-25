@@ -314,26 +314,14 @@ See [docs/HOOKS.md](docs/HOOKS.md) for more patterns.
 
 ## Access Control
 
-User context management with `as_user()`:
+User context management with `as_user()`. With `TimestampedMixin`, only an entity's owner may write, delete or hand it over (`set_owner`):
 
 ```python
-from ic_python_db import Database, Entity, String, ACTION_MODIFY, ACTION_DELETE
+from ic_python_db import Database, Entity, String
 from ic_python_db.mixins import TimestampedMixin
-from ic_python_db.context import get_caller_id
 
 class Document(Entity, TimestampedMixin):
     title = String()
-    
-    @staticmethod
-    def on_event(entity, field_name, old_value, new_value, action):
-        caller = get_caller_id()
-        
-        # Only owner can modify or delete
-        if action in (ACTION_MODIFY, ACTION_DELETE):
-            if entity._owner != caller:
-                return False, None
-        
-        return True, new_value
 
 db = Database.get_instance()
 
@@ -343,7 +331,7 @@ with db.as_user("alice"):
 
 # Bob cannot modify Alice's document
 with db.as_user("bob"):
-    doc.title = "Hacked"  # Raises ValueError
+    doc.title = "Hacked"  # Raises PermissionError; nothing changes
 ```
 
 See [docs/ACCESS_CONTROL.md](docs/ACCESS_CONTROL.md) and [examples/simple_access_control.py](examples/simple_access_control.py).

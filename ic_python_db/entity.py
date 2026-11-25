@@ -314,6 +314,17 @@ class Entity:
                     f"Only the owner can update this entity. Current owner: {self._owner}"
                 )
 
+    def _check_write(self) -> None:
+        """Raise before a write to this entity changes anything.
+
+        The save that ends a write refuses it too, but a field's index entries,
+        its sorted entry and a relation's reverse index are written before that
+        save, and its hook has run: refused only there, a write the caller may
+        not make had already moved them.
+        """
+        self._refuse_if_newer()
+        self._check_owner()
+
     def _refuse_if_newer(self) -> None:
         """Raise MigrationError if this row was stored by newer code."""
         if self._newer_version is not None:
@@ -1305,6 +1316,9 @@ class Entity:
             OneToOne,
             _require_unpaged,
         )
+
+        # Deleting is a write: refused to a caller who does not own the entity
+        self._check_owner()
 
         # Call hook before deletion
         allow, _ = call_entity_hook(self, None, self, None, ACTION_DELETE)

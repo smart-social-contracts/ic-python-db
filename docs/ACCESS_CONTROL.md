@@ -36,7 +36,7 @@ with db.as_user("bob"):
 Who may claim and write:
 
 - The first save of an entity claims it: the caller becomes its creator and owner.
-- After that, only the owner may write it, and only the owner may give it away: `entity.set_owner(new_owner)` is a write, refused like any other to a caller who does not own the entity. It stores the transfer at once and records the caller as the updater.
+- After that, only the owner may write it, delete it, or give it away. A write by anyone else raises `PermissionError` before it changes anything: no hook runs, and no value, index entry or relation moves. `entity.set_owner(new_owner)` is such a write; it stores the transfer at once and records the caller as the updater.
 - A caller id and an owner are non-empty strings. `set_caller_id`, `as_user` and `set_owner` raise `ValueError` for `None` or `""`: inside the mixin, no owner means "not claimed yet", which any caller may write.
 - `deserialize()` ignores the `owner`, `creator`, `updater`, `timestamp_created` and `timestamp_updated` in the data. An import claims a new row for the caller, and an update records the caller as the updater, as any other write does.
 
@@ -50,28 +50,24 @@ A row stored before its class had the mixin has no owner, and the first caller t
 
 ## Access Control Pattern
 
-Combine `as_user()` with `on_event` hooks for access control:
+With `TimestampedMixin`, writing and deleting another caller's entity is already refused, before any hook runs:
 
 ```python
-from ic_python_db import ACTION_MODIFY, ACTION_DELETE, Entity, String
-from ic_python_db.context import get_caller_id
+from ic_python_db import Entity, String
 from ic_python_db.mixins import TimestampedMixin
 
 class ProtectedDocument(Entity, TimestampedMixin):
     title = String()
     content = String()
 
-    @staticmethod
-    def on_event(entity, field_name, old_value, new_value, action):
-        caller_id = get_caller_id()
+with db.as_user("alice"):
+    doc = ProtectedDocument(title="Alice's")
 
-        # Only owner can modify or delete
-        if action in (ACTION_MODIFY, ACTION_DELETE):
-            if entity._owner != caller_id:
-                return False, None  # Deny access
-
-        return True, new_value
+with db.as_user("bob"):
+    doc.title = "Bob's"  # PermissionError; the row and its indexes are unchanged
 ```
+
+`on_event` hooks add rules on top of that, for the owner's own writes: see Field-Level Access below.
 
 ## Nested Contexts
 
@@ -120,26 +116,16 @@ with db.as_user("alice"):
 
 ### Admin Override
 
+With `TimestampedMixin` the owner check runs before the hook, so a hook cannot let a caller other than the owner write. An administrator acts on another caller's entity as its owner, or has it handed over by the owner with `set_owner`:
+
 ```python
-class ProtectedEntity(Entity, TimestampedMixin):
-    value = String()
-    
-    ADMINS = ["admin", "superuser"]
-    
-    @staticmethod
-    def on_event(entity, field_name, old_value, new_value, action):
-        caller = get_caller_id()
-        
-        # Admins can do anything
-        if caller in ProtectedEntity.ADMINS:
-            return True, new_value
-        
-        # Others need ownership
-        if action in (ACTION_MODIFY, ACTION_DELETE):
-            if entity._owner != caller:
-                return False, None
-        
-        return True, new_value
+ADMINS = ["admin", "superuser"]
+
+def admin_update(entity, field, value):
+    if get_caller_id() not in ADMINS:
+        raise PermissionError("admins only")
+    with db.as_user(entity._owner):
+        setattr(entity, field, value)
 ```
 
 ### Field-Level Access

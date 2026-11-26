@@ -70,10 +70,14 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install realms-gos as its CI does, then this library over its pin
+    # realms-gos's requirements are installed without their ic-python-db line:
+    # the candidate replaces it anyway, and a pin-bump branch pins the version
+    # being released, which is not on PyPI until this release is published.
+    - name: Install realms-gos as its CI does, then this library in place of its pin
       run: |
         pip install -e realms-gos/cli/
-        pip install -r realms-gos/requirements.txt
+        grep -viE '^ic-python-db([^a-z0-9_.-]|$)' realms-gos/requirements.txt > consumer-requirements.txt
+        pip install -r consumer-requirements.txt
         pip install pytest pytest-cov cedarpy==4.12.2
         pip install ./ic-python-db
         python -c "import ic_python_db as d; print('ic-python-db from', d.__file__)"

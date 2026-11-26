@@ -102,6 +102,17 @@ class Property(Generic[T]):
             raise ValueError(f"Invalid value for {self.name}: {value}")
         return value
 
+    def _converts(self) -> bool:
+        """True for a subclass that converts in ``__set__`` or ``__get__``
+        (realms-gos's ``Json`` keeps a list as JSON text). Its rows hold the
+        value before the conversion, while its ``default`` is in the converted
+        form; a migration must not put either through a check or a conversion
+        meant for the other."""
+        return (
+            type(self).__set__ is not Property.__set__
+            or type(self).__get__ is not Property.__get__
+        )
+
     def _migrated(self, value):
         """``value``, which a ``migrate()`` set, as the row is to store it:
         checked and converted the way a write checks it.
@@ -116,11 +127,7 @@ class Property(Generic[T]):
         ``__set__`` would store: the row is built through ``__set__``, so that
         form would be converted twice.
         """
-        converts = (
-            type(self).__set__ is not Property.__set__
-            or type(self).__get__ is not Property.__get__
-        )
-        return value if converts else self._checked(value)
+        return value if self._converts() else self._checked(value)
 
     def __set__(self, obj, value):
         # Fast path: hydrating from DB — store raw value, indexes are intact.

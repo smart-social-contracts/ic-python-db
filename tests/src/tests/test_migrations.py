@@ -1118,6 +1118,48 @@ class TestMigrations:
             assert "Note@1" in str(e) and "tags" in str(e), str(e)
         assert Note.load("2").tags == ["ok"]
 
+    def test_a_converting_field_added_later_reads_its_default_on_an_old_row(self):
+        """A field added in a later version, and not set by migrate(), is
+        filled with its default. realms-gos's Json keeps its default as JSON text
+        ("[]"), and the row is built through its __set__, which encoded it a
+        second time: an old row read the string "[]" where a new row reads [],
+        and the migration stored the string. It now reads its default as a new
+        row does. A plain field's default is still filled in and stored."""
+
+        class JsonText(String):
+            def __init__(self, default=None, **kw):
+                super().__init__(default=json.dumps(default), **kw)
+
+            def __get__(self, obj, t=None):
+                if obj is None:
+                    return self
+                return json.loads(super().__get__(obj, t) or "null")
+
+            def __set__(self, obj, value):
+                super().__set__(obj, json.dumps(value))
+
+        class Note(Entity):
+            __version__ = 2
+            text = String()
+            tags = JsonText(default=[])
+            status = String(default="open")
+
+        db = Database.get_instance()
+        db.save(
+            "Note", "1", {"_type": "Note", "_id": "1", "__version__": 1, "text": "old"}
+        )
+        db.save("_system", "Note_id", "1")
+
+        old = Note.load("1")
+        assert old.tags == [], repr(old.tags)
+        stored = db.load("Note", "1")
+        assert stored["__version__"] == 2 and stored["tags"] == [], stored
+        assert stored["status"] == "open", stored
+        assert Note(text="new").tags == []
+
+        db.clear_registry()  # a later message reads what the migration stored
+        assert Note.load("1").tags == []
+
     def test_migrated_values_move_in_the_field_index(self):
         """A value that migrate() changes leaves the old value's index entry
         and is found under the new one."""

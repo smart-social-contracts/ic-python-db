@@ -125,7 +125,9 @@ class Property(Generic[T]):
         subclass can override this to check it its own way. An override must
         return the value in the form ``migrate()`` gave it, never what
         ``__set__`` would store: the row is built through ``__set__``, so that
-        form would be converted twice.
+        form would be converted twice. A subclass that overrides ``__set__`` or
+        ``__get__`` for another reason (logging, say) is taken to convert too,
+        and should override this to ``return self._checked(value)``.
         """
         return value if self._converts() else self._checked(value)
 

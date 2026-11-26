@@ -263,12 +263,14 @@ class Entity:
         # deserialize() upserts — run the full descriptor path.
         self._hydrating = self._loaded
         try:
-            # Set additional attributes
-            for k, v in kwargs.items():
-                if not k.startswith("_"):
-                    setattr(self, k, v)
-            if self._loaded and hasattr(self, "_restore_state"):
-                self._restore_state()
+            if self._loaded:
+                for k, v in kwargs.items():
+                    if not k.startswith("_"):
+                        setattr(self, k, v)
+                if hasattr(self, "_restore_state"):
+                    self._restore_state()
+            else:
+                self._apply_arguments(kwargs)
             self._do_not_save = False
             self._hydrating = False
 
@@ -276,9 +278,6 @@ class Entity:
                 # A new entity is filed in its indexes only now, with every
                 # argument applied and the defaults of the others: an argument
                 # refused after an indexed one leaves no entry behind.
-                alias = getattr(type(self), "__alias__", None)
-                if alias:
-                    self._refuse_taken_alias(getattr(self, alias, None))
                 self._save()
                 self._index_new()
         except Exception:
@@ -291,6 +290,39 @@ class Entity:
             if not self._loaded:
                 self._undo_unsaved(counter_before)
             raise
+
+    def _apply_arguments(self, kwargs: dict) -> None:
+        """Set a new entity's arguments: its fields, then its relations, a
+        OneToOne last; each group in the order given.
+
+        Every refusal that can come from a field (its type, its validator, its
+        hook, an alias another row holds) then comes before any relation has
+        written anything; the links relations make are taken back if the
+        constructor fails (see _undo_unsaved). A OneToOne comes last because
+        linking it can clear a link its target had and save the target: that
+        write to another row is not taken back. Only another OneToOne argument,
+        or the save itself, can fail after it.
+        """
+        from .properties import OneToOne, Relation
+
+        fields, relations, one_to_one = [], [], []
+        for k, v in kwargs.items():
+            if k.startswith("_"):
+                continue
+            attr = getattr(type(self), k, None)
+            if isinstance(attr, OneToOne):
+                one_to_one.append((k, v))
+            elif isinstance(attr, Relation):
+                relations.append((k, v))
+            else:
+                fields.append((k, v))
+        for k, v in fields:
+            setattr(self, k, v)
+        alias = getattr(type(self), "__alias__", None)
+        if alias:
+            self._refuse_taken_alias(getattr(self, alias, None))
+        for k, v in relations + one_to_one:
+            setattr(self, k, v)
 
     def _index_new(self) -> None:
         """File a new entity in its field and sorted indexes (see __init__)."""

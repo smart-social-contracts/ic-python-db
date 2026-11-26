@@ -18,12 +18,19 @@ on:
           - patch
           - minor
           - major
+      realms_gos_ref:
+        description: 'realms-gos branch, tag or commit the candidate must pass tests/ggg on'
+        required: true
+        default: 'main'
+        type: string
 
 jobs:
   # The candidate must pass realms-gos's tests/ggg first: see the comment in
   # realms-gos-tests.yml for why this gate exists and must stay blocking.
   realms-gos-tests:
     uses: ./.github/workflows/realms-gos-tests.yml
+    with:
+      realms_gos_ref: ${{ inputs.realms_gos_ref }}
 
   release:
     needs: realms-gos-tests
@@ -82,6 +89,8 @@ jobs:
         tag_name: v${{ steps.bump_version.outputs.NEW_VERSION }}
         name: Release v${{ steps.bump_version.outputs.NEW_VERSION }}
         generate_release_notes: true
+        body: |
+          Tested against realms-gos `${{ needs.realms-gos-tests.outputs.realms_gos_sha }}` (tests/ggg, plain and strict).
         # Stays a draft until the checksum file is signed with the release key
         draft: true
         files: |

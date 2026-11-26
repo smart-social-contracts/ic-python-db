@@ -14,6 +14,15 @@ name: realms-gos tests against this library
 
 on:
   workflow_call:
+    inputs:
+      realms_gos_ref:
+        description: realms-gos branch, tag or commit to test against
+        type: string
+        default: main
+    outputs:
+      realms_gos_sha:
+        description: the realms-gos commit the candidate was tested against
+        value: ${{ jobs.tests-ggg.outputs.realms_gos_sha }}
   pull_request:
     branches: [ main ]
     paths: [ .github/workflows/realms-gos-tests.yml ]
@@ -24,18 +33,37 @@ permissions:
 jobs:
   tests-ggg:
     runs-on: ubuntu-latest
+    outputs:
+      realms_gos_sha: ${{ steps.revisions.outputs.realms_gos_sha }}
     steps:
     - name: Check out this library (the candidate)
       uses: actions/checkout@v4
       with:
         path: ic-python-db
 
-    - name: Check out realms-gos main
+    - name: Check out realms-gos
       uses: actions/checkout@v4
       with:
         repository: smart-social-contracts/realms-gos
+        # main on a pull request; what the release names, when it names one
+        ref: ${{ inputs.realms_gos_ref || 'main' }}
         path: realms-gos
         submodules: recursive
+
+    # Name both commits: a red here is attributable to one of them, and the
+    # release records the consumer revision it was proved against. The
+    # candidate's version string is the last release's until the release job
+    # bumps it, so the commit is what identifies it.
+    - name: Record the two revisions
+      id: revisions
+      run: |
+        candidate=$(git -C ic-python-db rev-parse HEAD)
+        consumer=$(git -C realms-gos rev-parse HEAD)
+        echo "realms_gos_sha=$consumer" >> "$GITHUB_OUTPUT"
+        {
+          echo "ic-python-db candidate: \`$candidate\`"
+          echo "realms-gos: \`$consumer\` (ref \`${{ inputs.realms_gos_ref || 'main' }}\`)"
+        } | tee -a "$GITHUB_STEP_SUMMARY"
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -48,7 +76,7 @@ jobs:
         pip install -r realms-gos/requirements.txt
         pip install pytest pytest-cov cedarpy==4.12.2
         pip install ./ic-python-db
-        python -c "import ic_python_db as d; print('ic-python-db', d.__version__, d.__file__)"
+        python -c "import ic_python_db as d; print('ic-python-db from', d.__file__)"
 
     - name: realms-gos tests/ggg, plain and strict
       working-directory: realms-gos
